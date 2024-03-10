@@ -11,7 +11,7 @@ def flatten_and_sort(expert_idxs:torch.Tensor):
     sorted_expert_idxs, sorted_scattered_idxs = torch.sort(flattened_expert_idxs)
     return sorted_expert_idxs, sorted_scattered_idxs
 
-# @torch.jit.script
+@torch.jit.script
 def padded_block_indices(sorted_experts_idxs: torch.Tensor, k: int, N_BLOCK_SIZE: int=BLOCK_M) :
     expert_counts = torch.bincount(sorted_experts_idxs, minlength=k)
     padded_block_counts = ((expert_counts - 1) // N_BLOCK_SIZE) + 1
@@ -38,8 +38,6 @@ def padded_block_indices(sorted_experts_idxs: torch.Tensor, k: int, N_BLOCK_SIZE
 def _scatter2scatter_configs():
     return [
         triton.Config({'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_N': 64, 'BLOCK_K': 16}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_N': 32, 'BLOCK_K': 16}, num_stages=4, num_warps=4),
     ]
 
 @triton.autotune(configs=_scatter2scatter_configs(), key=['M', 'N', 'K'], )
@@ -164,7 +162,6 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
         OUT_M=O.size(0),
         allow_tf32=True,
         x_grouped=x_grouped, y_grouped=y_grouped,
-        # NO_K_MASK=(X.size(1) % BLOCK_K == 0),
     )
     return O
 
@@ -172,144 +169,7 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
 def _config_XtY():
     return [
         triton.Config({'BLOCK_N': 128, 'BLOCK_K': 128, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_N': 64, 'BLOCK_K': 64, 'BLOCK_M': 16}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_N': 64, 'BLOCK_K': 128}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_N': 32, 'BLOCK_K': 64}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_N': 16, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
     ]
-
-def scatter_bwd_W(DY, X, expert_offsets, sorted_scattered_idxs, E,
-                  x_fan_out=1, dy_fan_out=1,
-                  dy_weights=None):
-    # DW = torch.zeros((E, X.size(-1), DY.size(-1)), device=DY.device, dtype=DY.dtype)
-    assert DY.size(0) * dy_fan_out == X.size(0) * x_fan_out
-    DWt = torch.empty((E, DY.size(-1), X.size(-1)), device=DY.device, dtype=DY.dtype)
-
-    DW = DWt.permute(0, 2, 1)
-    if dy_weights is None:
-        weighted_dy = False
-        P = None
-    else:
-        weighted_dy = True
-        P = dy_weights
-    # T = torch.empty((padded_block_idxs.size(0), BLOCK_M), dtype=torch.int32, device=DY.device)
-    def grid(META):
-        grid = (
-            E * triton.cdiv(META['K'], META['BLOCK_K']),
-            triton.cdiv(META['N'], META['BLOCK_N']),
-        )
-        return grid
-    _scatterXtY[grid](
-        # DY_ptr, stride_ym, stride_yn,
-        DY, DY.stride(0), DY.stride(1),
-        # X_ptr, stride_xm, stride_xk,
-        X, X.stride(0), X.stride(1),
-        # DW_ptr, stride_dwe, stride_dwk, stride_dwn,
-        DW, DW.stride(0), DW.stride(1), DW.stride(2),
-        # P_ptr
-        P,
-        # grouped_idx_ptr, expert_offset_ptr
-        sorted_scattered_idxs, expert_offsets,
-        ACC_TYPE=tl.float32,
-        allow_tf32=True,
-        X_FAN_OUT=x_fan_out, DY_FAN_OUT=dy_fan_out,
-        M=DY.size(0), N=DY.size(-1), K=X.size(-1), E=E,
-        weighted_dy=weighted_dy
-    )
-    return DW
-
-@triton.autotune(configs=_config_XtY(), key=['M', 'N', 'K'],)
-@triton.jit
-def _scatterXtY(
-    DY_ptr, stride_dym, stride_dyk,
-    X_ptr, stride_xm, stride_xn,
-    DW_ptr, stride_dwe, stride_dwk, stride_dwn,
-    # T_ptr, stride_tl, stride_tt,
-    P_ptr,
-    grouped_idx_ptr, expert_offsets_ptr,
-    X_FAN_OUT: tl.constexpr, DY_FAN_OUT: tl.constexpr,
-    M: tl.constexpr, K: tl.constexpr, N: tl.constexpr, E: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-    ACC_TYPE: tl.constexpr,
-    allow_tf32: tl.constexpr,
-    weighted_dy: tl.constexpr,
-):
-    pid0 = tl.program_id(axis=0)
-    pid1 = tl.program_id(axis=1)
-    num0 = tl.num_programs(0)
-    num1 = tl.num_programs(1)
-
-    pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 128)
-    
-    K_BLOCK_COUNT = K // BLOCK_K
-    E_idx = pid0 // K_BLOCK_COUNT
-    K_block_id = pid0 % K_BLOCK_COUNT
-    N_block_id = pid1
-    # tl.device_print("Experts:", E, tl.num_programs(0) // K_BLOCK_COUNT)
-
-    if E_idx == 0:
-        start_idx =  0
-    else:
-        start_idx = tl.load(expert_offsets_ptr + E_idx - 1).to(tl.int64)
-    end_idx = tl.load(expert_offsets_ptr + E_idx).to(tl.int64)
-    # block_count = end_idx - start_idx
-
-    M_block = tl.max_contiguous(start_idx + tl.arange(0, BLOCK_M), BLOCK_M)
-    K_block = K_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
-    K_mask = K_block < K
-    K_block = tl.max_contiguous(tl.multiple_of(K_block % K, BLOCK_K), BLOCK_K)
-    N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
-    N_mask = N_block < N
-    N_block = tl.max_contiguous(tl.multiple_of(N_block % N, BLOCK_N), BLOCK_N)
-
-    acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=ACC_TYPE)
-    X_blk_ptrs = X_ptr + K_block[:, None]
-    DY_blk_ptrs = DY_ptr + N_block[None, :]
-    I_ptrs = grouped_idx_ptr + M_block
-
-    iters = tl.cdiv(end_idx - start_idx, BLOCK_M)
-    for i in range(0, iters - 1):
-        M_idxs = tl.load(I_ptrs)
-        M_in_idxs = M_idxs // X_FAN_OUT
-        xt_blk_ptrs = X_blk_ptrs + M_in_idxs[None, :] * stride_xm
-        M_out_idxs = M_idxs // DY_FAN_OUT
-        dy_blk_ptrs = DY_blk_ptrs + M_out_idxs[:, None] * stride_dym
-
-        xt = tl.load(xt_blk_ptrs)
-        dy = tl.load(dy_blk_ptrs)
-
-        if weighted_dy:
-            w = tl.load(P_ptr + M_idxs)
-            xt *= w[None, :]
-        # tl.store(T_ptr + stride_tl * M_id + stride_tt * M_range, E_idx + 0 * M_out_idxs)
-        acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
-
-        I_ptrs += BLOCK_M
-        M_block += BLOCK_M
-
-    mask = M_block < end_idx
-    M_idxs = tl.load(I_ptrs, mask=mask, other=0)
-    M_in_idxs = M_idxs // X_FAN_OUT
-    xt_blk_ptrs = X_blk_ptrs + M_in_idxs[None, :] * stride_xm
-    M_out_idxs = M_idxs // DY_FAN_OUT
-    dy_blk_ptrs = DY_blk_ptrs + M_out_idxs[:, None] * stride_dym
-
-    xt = tl.load(xt_blk_ptrs, mask=mask[None, :])
-    dy = tl.load(dy_blk_ptrs, mask=mask[:, None])
-
-    if weighted_dy:
-        w = tl.load(P_ptr + M_idxs, mask=mask, other=0.)
-        xt *= w[None, :]
-    acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
-
-    DW_blk_ptrs = (
-        DW_ptr + E_idx * stride_dwe +
-        K_block[:, None] * stride_dwk +
-        N_block[None, :] * stride_dwn
-    )
-    acc = acc.to(DW_blk_ptrs.dtype.element_ty)
-    tl.store(DW_blk_ptrs, acc)
-    # tl.load(DW_blk_ptrs)
 
 def group_bwd_W(DY, X, expert_offsets, E):
     DWt = torch.zeros((E, DY.size(-1), X.size(-1)), device=DY.device, dtype=DY.dtype)
@@ -485,55 +345,3 @@ def _group(
 
         src_blk_ptrs += BLOCK_K * stride_sk
         tgt_blk_ptrs += BLOCK_K * stride_ti
-
-if __name__ == '__main__':
-    import numpy as np
-    E = 8
-    # L = 2048
-    L = 512
-    xdim = 1024
-    k = 2
-    hdim = 2048
-    # dtype = torch.bfloat16
-    dtype = torch.float16
-
-    X = torch.randn(L, xdim, dtype=dtype).cuda()
-    W = torch.randn(E, xdim, hdim, dtype=dtype).cuda()
-    W.requires_grad_(True)
-    logits = torch.randn(L, E, dtype=dtype).cuda()
-
-    expert_p, expert_idxs = torch.topk(logits, k=k)
-    sorted_expert_idxs, sorted_scattered_idxs = flatten_and_sort(expert_idxs)
-    padded_block_idxs, expert_offsets = padded_block_indices(sorted_expert_idxs)
-    DY = torch.randn(L, hdim, dtype=dtype).cuda()
-    print("bin count:", expert_offsets)
-    print("sort idxs:", sorted_scattered_idxs)
-
-
-    def test_strategy(strat, name):
-        warmup = 50
-        repetitions = 100
-        fwd_timings = np.zeros(repetitions)
-        for i in range(warmup):
-            strat()
-        starter, ender = \
-            torch.cuda.Event(enable_timing=True), \
-            torch.cuda.Event(enable_timing=True)
-        for rep in range(repetitions):
-            starter.record()
-            strat()
-            ender.record()
-            torch.cuda.synchronize()
-            elapsed = starter.elapsed_time(ender)
-            fwd_timings[rep] = elapsed
-        print(name, "latency for forward: ", np.mean(fwd_timings), "±", np.std(fwd_timings))
-
-
-    strat_grouped = lambda: scatterXtY(DY, X, expert_offsets, sorted_scattered_idxs, E, grouped_XY=Tru)
-    strat_scattered = lambda: scatterXtY(DY, X, expert_offsets, sorted_scattered_idxs, E, grouped_XY=False)
-
-    test_strategy(strat_scattered, "Scattered")
-    test_strategy(strat_grouped, "Grouped")
-
-
-
