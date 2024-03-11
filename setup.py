@@ -13,7 +13,7 @@ setup(
     description = "Triton-based implementation of Sparse Mixture of Experts.",
     license = "Apache License",
     keywords = "triton pytorch llm",
-    url = "",
+    url = "https://github.com/shawntan/scattermoe",
     packages=find_packages(),
     long_description=read('README.md'),
     install_requires=['torch', 'triton'],
