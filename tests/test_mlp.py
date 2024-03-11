@@ -2,7 +2,7 @@ import pytest
 import torch
 from torch import nn
 from torch.nn import functional as F
-from scattermoe.mlp import MoE
+from scattermoe.mlp import MLP
 
 
 def dumb_forward(m, x, expert_p, expert_idxs):
@@ -33,7 +33,7 @@ class TestClass:
         k_weights, k_idxs = torch.topk(weights, k)
         k_weights.requires_grad_()
 
-        mlp = MoE(
+        mlp = MLP(
             input_size=x_dim, hidden_size=h_dim,
             activation=nn.GELU(),
             num_experts=E, top_k=k

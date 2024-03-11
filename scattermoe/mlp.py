@@ -5,7 +5,7 @@ from torch.nn import functional as F
 from . import kernels
 from .parallel_experts import ParallelExperts
 
-class MoEGLU(nn.Module):
+class GLUMLP(nn.Module):
     def __init__(
         self, 
         input_size, 
@@ -14,7 +14,7 @@ class MoEGLU(nn.Module):
         top_k,
         activation=nn.SiLU(),
     ):
-        super(MoEGLU, self).__init__()
+        super(GLUMLP, self).__init__()
 
         self.num_experts = num_experts
         self.input_size = input_size
@@ -51,7 +51,7 @@ class MoEGLU(nn.Module):
         return y
 
 
-class MoE(nn.Module):
+class MLP(nn.Module):
     def __init__(
         self,
         input_size,
@@ -60,7 +60,7 @@ class MoE(nn.Module):
         top_k,
         activation=None,
     ):
-        super(MoE, self).__init__()
+        super(MLP, self).__init__()
 
         self.num_experts = num_experts
         self.input_size = input_size

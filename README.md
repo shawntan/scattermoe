@@ -12,10 +12,10 @@ Enjoy!
 
 ## Usage
 ```python
-from scattermoe.mlp import MoE
+from scattermoe.mlp import MLP
 
 # Initialise module...
-mlp = MoE(
+mlp = MLP(
     input_size=x_dim, hidden_size=h_dim,
     activation=nn.GELU(),
     num_experts=E, top_k=k
