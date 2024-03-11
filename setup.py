@@ -1,5 +1,6 @@
 import os
-from setuptools import setup
+from setuptools import setup, find_packages
+import scattermoe
 
 def read(fname):
     return open(os.path.join(os.path.dirname(__file__), fname)).read()
@@ -13,9 +14,10 @@ setup(
     license = "Apache License",
     keywords = "triton pytorch llm",
     url = "",
-    packages=['scattermoe'],
+    packages=find_packages(),
     long_description=read('README.md'),
-    requires=['torch', 'triton'],
+    install_requires=['torch', 'triton'],
+    tests_require=['pytest'],
     classifiers=[
         "Development Status :: 1 - Planning",
         "License :: OSI Approved :: Apache Software License",
