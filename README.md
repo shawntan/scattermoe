@@ -1,5 +1,8 @@
 # scattermoe
-Triton-based implementation of Sparse Mixture of Experts. 
+Triton-based implementation of Sparse Mixture-of-Experts (SMoE) on GPUs. 
+ScatterMoE builds upon existing implementations, and overcoming some of the limitations to improve inference, training speed, and memory footprint. 
+This implementation achieves this by avoiding padding and making excessive copies of the input.
+We also fuse expert linear transforms and reordering operations with `ParallelLinear`, a module that can be used to extend the concept of SMoEs.
 
 You can find the report [here](https://arxiv.org/abs/2403.08245)
 
