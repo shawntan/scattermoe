@@ -1,6 +1,8 @@
 # scattermoe
 Triton-based implementation of Sparse Mixture of Experts. 
 
+You can find the report [here](https://arxiv.org/abs/2403.08245)
+
 ## Installation
 ```sh
 # Check all is working well.
