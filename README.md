@@ -15,7 +15,6 @@ PYTHONPATH=. pytest tests
 # Install editable. This will allow you to modify scattermoe in this directory.
 pip install -e .
 ```
-Enjoy!
 
 ## Usage
 ```python
@@ -34,3 +33,9 @@ Y = mlp(
     k_weights, # top-k weights from router
     k_idxs     # top-k indices from router
 )
+```
+
+Enjoy!
+---
+### More examples
+1. [Integration into HuggingFace Mixtral](https://github.com/shawntan/scattermoe/tree/main/examples/mixtral)
