@@ -17,7 +17,10 @@ for training:
 config.output_router_logits = True
 ```
 This will ensure that the auxiliary loss is added to the loss computed for training. The MoE auxiliary losses are
-load balancing losses that try to that there is no over-reliance on only a few experts during training.
+load balancing losses that try to that there is no over-reliance on only a few experts during training.  Then,
+```python
+model = MixtralForCausalLM(config)
+```
 
 
 
