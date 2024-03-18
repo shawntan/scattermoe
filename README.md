@@ -36,6 +36,7 @@ Y = mlp(
 ```
 
 Enjoy!
----
+
+-----
 ### More examples
 1. [Integration into HuggingFace Mixtral](https://github.com/shawntan/scattermoe/tree/main/examples/mixtral)
