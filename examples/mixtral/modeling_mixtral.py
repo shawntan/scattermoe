@@ -695,7 +695,7 @@ class MixtralSparseMoeBlock(nn.Module):
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         # we cast back to the input dtype
         routing_weights = routing_weights.to(hidden_states.dtype)
-        final_hidden_states = self.moe_mlp(hidden_states, router_logits, routing_weights, selected_experts)
+        final_hidden_states = self.moe_mlp(hidden_states, routing_weights, selected_experts)
         final_hidden_states = final_hidden_states.view(batch_size, sequence_length, hidden_dim)
         return final_hidden_states, router_logits
 
