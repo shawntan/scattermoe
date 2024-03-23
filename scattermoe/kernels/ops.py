@@ -52,7 +52,7 @@ def _scatter2scatter(
     Y_ptr, stride_ym, stride_yn,
     grouped_idx_ptr, expert_idxs_ptr, block_start_idx_ptr,
     FAN_OUT: tl.constexpr,
-    M: tl.constexpr, K: tl.constexpr, N: tl.constexpr, E: tl.constexpr,
+    M, K: tl.constexpr, N: tl.constexpr, E: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     ACC_TYPE: tl.constexpr,
     OUT_M: tl.constexpr,
@@ -98,7 +98,7 @@ def _scatter2scatter(
     for K_block_id in range(0, iters):
         if NO_K_MASK:
             x = tl.load(X_blk_ptrs, mask=E_mask[:, None])
-            if NO_N_MASK:
+            if NO_N_MASK or (N_block_id + 1) * BLOCK_N < N:
                 w = tl.load(W_blk_ptrs)
             else:
                 w = tl.load(W_blk_ptrs, mask=N_mask[None, :])
@@ -249,15 +249,25 @@ def _groupXtY(
         acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=ACC_TYPE)
         iters = tl.cdiv(end_idx - start_idx, BLOCK_M)
         for i in range(0, iters):
-            M_mask = (i * BLOCK_M + M_block) < end_idx
-            if NO_K_MASK:
-                xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
+            if i < iters - 1:
+                if NO_K_MASK:
+                    xt = tl.load(xt_blk_ptrs)
+                else:
+                    xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None])
+                if NO_N_MASK:
+                    dy = tl.load(dy_blk_ptrs)
+                else:
+                    dy = tl.load(dy_blk_ptrs, mask=N_mask[None, :])
             else:
-                xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None] & M_mask[None, :])
-            if NO_N_MASK:
-                dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
-            else:
-                dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
+                M_mask = (i * BLOCK_M + M_block) < end_idx
+                if NO_K_MASK:
+                    xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
+                else:
+                    xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None] & M_mask[None, :])
+                if NO_N_MASK:
+                    dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
+                else:
+                    dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
             acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
             xt_blk_ptrs += BLOCK_M * stride_xm
             dy_blk_ptrs += BLOCK_M * stride_dym
