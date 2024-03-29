@@ -16,6 +16,7 @@ setup(
     url = "https://github.com/shawntan/scattermoe",
     packages=find_packages(),
     long_description=read('README.md'),
+    python_requires='>=3.10.10',
     install_requires=['torch', 'triton'],
     tests_require=['pytest'],
     classifiers=[
