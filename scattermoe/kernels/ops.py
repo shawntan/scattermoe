@@ -52,7 +52,7 @@ def _scatter2scatter(
     Y_ptr, stride_ym, stride_yn,
     grouped_idx_ptr, expert_idxs_ptr, block_start_idx_ptr,
     FAN_OUT: tl.constexpr,
-    M: tl.constexpr, K: tl.constexpr, N: tl.constexpr, E: tl.constexpr,
+    M, K: tl.constexpr, N: tl.constexpr, E: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     ACC_TYPE: tl.constexpr,
     OUT_M: tl.constexpr,
@@ -98,7 +98,7 @@ def _scatter2scatter(
     for K_block_id in range(0, iters):
         if NO_K_MASK:
             x = tl.load(X_blk_ptrs, mask=E_mask[:, None])
-            if NO_N_MASK:
+            if NO_N_MASK or ((N_block_id + 1) * BLOCK_N) < N:
                 w = tl.load(W_blk_ptrs)
             else:
                 w = tl.load(W_blk_ptrs, mask=N_mask[None, :])
@@ -258,9 +258,11 @@ def _groupXtY(
                 dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
             else:
                 dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
-            acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
+            # acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
             xt_blk_ptrs += BLOCK_M * stride_xm
             dy_blk_ptrs += BLOCK_M * stride_dym
+            acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
+
 
 
         DW_blk_ptrs = DW_ptr + E_idx * stride_dwe + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn
@@ -271,8 +273,8 @@ def _groupXtY(
 def _config_grouping():
     return [
         triton.Config({'BLOCK_N': 256, 'BLOCK_K': 128}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 64}, num_stages=4, num_warps=4),
-        triton.Config({'BLOCK_N': 64, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_N': 128, 'BLOCK_K': 64}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_N': 64, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
     ]
 
 def group(A, sorted_expert_idxs, coeff=None, fan_out=1, out=None):
@@ -329,8 +331,8 @@ def _group(
 
     iters = tl.cdiv(K, BLOCK_K)
     for i in range(0, iters):
-        if NO_K_MASK:
-            block = tl.load(src_blk_ptrs) # , mask=N_mask[:, None])
+        if NO_K_MASK or i < iters - 1:
+            block = tl.load(src_blk_ptrs, mask=N_mask[:, None])
             if has_coeff:
                 block *= c
             tl.store(tgt_blk_ptrs, block, mask=N_mask[:, None])
@@ -342,6 +344,5 @@ def _group(
             if has_coeff:
                 block *= c
             tl.store(tgt_blk_ptrs, block, mask=mask)
-
         src_blk_ptrs += BLOCK_K * stride_sk
         tgt_blk_ptrs += BLOCK_K * stride_ti
