@@ -59,13 +59,10 @@ from megablocks.layers.arguments import Arguments
 import scattermoe
 
 if is_flash_attn_2_available():
-    print("USING FLASH ATTN")
     from flash_attn import flash_attn_func, flash_attn_varlen_func
     from flash_attn.bert_padding import index_first_axis, pad_input, unpad_input  # noqa
 
     _flash_supports_window_size = "window_size" in list(inspect.signature(flash_attn_func).parameters)
-else:
-    print("USing nive attention")
 
 # This makes `_prepare_4d_causal_attention_mask` a leaf function in the FX graph.
 # It means that the function will not be traced through and simply appear as a node in the graph.
@@ -674,7 +671,6 @@ class MixtralSparseMoeBlock(nn.Module):
 
         # gating
         self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
-
         self.moe_mlp = scattermoe.mlp.GLUMLP(
             input_size=self.hidden_dim,
             hidden_size=self.ffn_dim,
@@ -685,7 +681,7 @@ class MixtralSparseMoeBlock(nn.Module):
 
 
     def forward(self, hidden_states: torch.Tensor):
-        """ """
+        print(hidden_states.size())
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (batch * sequence_length, n_experts)
@@ -876,17 +872,28 @@ class MixtralPreTrainedModel(PreTrainedModel):
     
     @classmethod
     def _load_pretrained_model(
-        cls, model, state_dict, loaded_state_dict_keys, 
+        cls,
+		model,
+        state_dict,
+        loaded_state_dict_keys,
         resolved_archive_file,
         pretrained_model_name_or_path,
-        *args, **kwargs):
+        ignore_mismatched_sizes,
+        sharded_metadata,
+        _fast_init,
+        low_cpu_mem_usage,
+        device_map,
+        offload_folder,
+        offload_state_dict,
+        dtype,
+        is_quantized,
+        keep_in_fp32_modules):
+
         import os
         import safetensors
         from safetensors import safe_open
-
         new_archive_file = resolved_archive_file.copy()
         new_loaded_state_dict_keys = loaded_state_dict_keys.copy()
-
         def get_new_path(orig_path):
             orig_dir = os.path.dirname(orig_path)
             orig_fn = os.path.basename(orig_path)
@@ -921,7 +928,7 @@ class MixtralPreTrainedModel(PreTrainedModel):
         for moe_id in moe_id2files:
             files = list(moe_id2files[moe_id])
             first_fn = files[0]
-            if all(os.path.exists(get_new_path(fn)) for fn in files):
+            if all(os.path.exists(get_new_path(fn)) for fn in files) and False:
                 tensor_dicts[first_fn] = True
             else:
                 consolidated = {'w1': [], 'w2': [], 'w3': []}
@@ -933,8 +940,8 @@ class MixtralPreTrainedModel(PreTrainedModel):
                     consolidated[weight_name] = torch.stack(consolidated[weight_name], dim=0)
                 
                 path_prefix = "model.layers.%d.block_sparse_moe.moe_mlp" % moe_id
-                in_weight_path = path_prefix + ".experts"
-                out_weight_path = path_prefix + ".output_experts"
+                in_weight_path = path_prefix + ".experts.weight"
+                out_weight_path = path_prefix + ".output_experts.weight"
                 tensor_dicts[first_fn][in_weight_path] = torch.cat([consolidated['w1'], consolidated['w3']], dim=1)
                 tensor_dicts[first_fn][out_weight_path] = consolidated['w2']
 
@@ -945,16 +952,36 @@ class MixtralPreTrainedModel(PreTrainedModel):
             if isinstance(tensor_dicts[orig_path], dict):
                 print("Writing to %s..." % new_path)
                 safetensors.torch.save_file(tensor_dicts[orig_path], new_path, {'format': "pt"})
+        for n, p in model.named_parameters():
+            new_loaded_state_dict_keys.append(n)
+            
+        weight_map = {}
+        for i in range(len(new_archive_file)):
+            fn = new_archive_file[i]
+            with safe_open(fn, framework="pt") as f:
+                for k in f.keys():
+                    weight_map[k] = fn
+        
+        sharded_metadata['weight_map'] = weight_map
+        sharded_metadata['all_checkpoint_keys'] = new_loaded_state_dict_keys
 
-        for n, _ in model.named_parameters():
-            if n not in new_loaded_state_dict_keys:
-                new_loaded_state_dict_keys.append(n)
             
         return super(MixtralPreTrainedModel, cls)._load_pretrained_model(
-            model, state_dict, new_loaded_state_dict_keys, 
+            # None, state_dict, new_loaded_state_dict_keys, 
+            model, state_dict,
+            new_loaded_state_dict_keys, 
             new_archive_file,
             pretrained_model_name_or_path,
-            *args, **kwargs
+			ignore_mismatched_sizes,
+			sharded_metadata,
+			_fast_init,
+			low_cpu_mem_usage,
+			device_map,
+			offload_folder,
+			offload_state_dict,
+			dtype,
+			is_quantized,
+			keep_in_fp32_modules
         )
 
 

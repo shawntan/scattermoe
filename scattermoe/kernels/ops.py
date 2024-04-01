@@ -55,7 +55,7 @@ def _scatter2scatter(
     M, K: tl.constexpr, N: tl.constexpr, E: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     ACC_TYPE: tl.constexpr,
-    OUT_M: tl.constexpr,
+    OUT_M,
     allow_tf32: tl.constexpr,
     x_grouped: tl.constexpr, y_grouped: tl.constexpr,
     NO_K_MASK: tl.constexpr, NO_N_MASK: tl.constexpr
