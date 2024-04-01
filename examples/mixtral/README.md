@@ -3,7 +3,14 @@
 Example integration of ScatterMoE into HuggingFace's implementation of Mixtral. 
 We replace `MixtralSparseMoeBlock`([original source](https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/models/mixtral/modeling_mixtral.py#L816)) with a ScatterMoE implementation ([source](https://github.com/shawntan/scattermoe/blob/main/examples/mixtral/modeling_mixtral.py#L667)). 
 
-We do not support loading of the existing Mixtral model for now, but to initialise a model from scratch:
+You can try loading the pretrained Mixtral from Huggingface (Experimental):
+```python
+model = MixtralForCausalLM.from_pretrained(
+    "mistralai/Mixtral-8x7B-v0.1"
+)
+```
+
+To initialise a model from scratch:
 ```python
 config = MixtralConfig.from_pretrained(
     "mistralai/Mixtral-8x7B-v0.1",
