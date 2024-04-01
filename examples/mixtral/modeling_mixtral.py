@@ -683,6 +683,7 @@ class MixtralSparseMoeBlock(nn.Module):
             activation=ACT2FN[config.hidden_act]
         )
 
+
     def forward(self, hidden_states: torch.Tensor):
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
@@ -872,6 +873,90 @@ class MixtralPreTrainedModel(PreTrainedModel):
             module.weight.data.normal_(mean=0.0, std=std)
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
+    
+    @classmethod
+    def _load_pretrained_model(
+        cls, model, state_dict, loaded_state_dict_keys, 
+        resolved_archive_file,
+        pretrained_model_name_or_path,
+        *args, **kwargs):
+        import os
+        import safetensors
+        from safetensors import safe_open
+
+        new_archive_file = resolved_archive_file.copy()
+        new_loaded_state_dict_keys = loaded_state_dict_keys.copy()
+
+        def get_new_path(orig_path):
+            orig_dir = os.path.dirname(orig_path)
+            orig_fn = os.path.basename(orig_path)
+            new_path = os.path.join(orig_dir , 'scattermoe_' + orig_fn)
+            return new_path
+
+        moe_id2files = {}
+        num_experts = 0
+        for i in range(len(resolved_archive_file)):
+            orig_fn = resolved_archive_file[i]
+            with safe_open(orig_fn, framework="pt", device=0) as f:
+                for k in f.keys():
+                    if "block_sparse_moe.experts" in k:
+                       k_path = k.split('.')
+                       moe_id = int(k_path[2])
+                       num_experts = max(num_experts, int(k_path[5]) + 1)
+                       if moe_id not in moe_id2files:
+                           moe_id2files[moe_id] = set()
+                       moe_id2files[moe_id].add(orig_fn)
+                       new_loaded_state_dict_keys.pop(new_loaded_state_dict_keys.index(k))
+            
+        tensor_dicts = {}
+        def get_tensor(full_path):
+            for fn in files:
+                if fn not in tensor_dicts:
+                    tensor_dicts[fn] = safetensors.torch.load_file(fn)
+                shard_dict = tensor_dicts[fn]
+                if full_path in shard_dict:
+                    w = shard_dict.pop(full_path)
+                    return w
+
+        for moe_id in moe_id2files:
+            files = list(moe_id2files[moe_id])
+            first_fn = files[0]
+            if all(os.path.exists(get_new_path(fn)) for fn in files):
+                tensor_dicts[first_fn] = True
+            else:
+                consolidated = {'w1': [], 'w2': [], 'w3': []}
+                for weight_name in consolidated:
+                    for e in range(num_experts):
+                        param_path = 'model.layers.%d.block_sparse_moe.experts.%d.%s.weight' %(moe_id, e, weight_name)
+                        w = get_tensor(param_path)
+                        consolidated[weight_name].append(w)
+                    consolidated[weight_name] = torch.stack(consolidated[weight_name], dim=0)
+                
+                path_prefix = "model.layers.%d.block_sparse_moe.moe_mlp" % moe_id
+                in_weight_path = path_prefix + ".experts"
+                out_weight_path = path_prefix + ".output_experts"
+                tensor_dicts[first_fn][in_weight_path] = torch.cat([consolidated['w1'], consolidated['w3']], dim=1)
+                tensor_dicts[first_fn][out_weight_path] = consolidated['w2']
+
+        # Save copies.
+        for orig_path in tensor_dicts:
+            new_path = get_new_path(orig_path)
+            new_archive_file[new_archive_file.index(orig_path)] = new_path
+            if isinstance(tensor_dicts[orig_path], dict):
+                print("Writing to %s..." % new_path)
+                safetensors.torch.save_file(tensor_dicts[orig_path], new_path, {'format': "pt"})
+
+        for n, _ in model.named_parameters():
+            if n not in new_loaded_state_dict_keys:
+                new_loaded_state_dict_keys.append(n)
+            
+        return super(MixtralPreTrainedModel, cls)._load_pretrained_model(
+            model, state_dict, new_loaded_state_dict_keys, 
+            new_archive_file,
+            pretrained_model_name_or_path,
+            *args, **kwargs
+        )
+
 
 
 MIXTRAL_INPUTS_DOCSTRING = r"""
