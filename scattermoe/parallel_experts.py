@@ -20,10 +20,14 @@ class ParallelLinear(torch.autograd.Function):
         )
         if gates is not None:
             output_expanded = output.view(gates.size(0), gates.size(1), output.size(-1))
+            output_expanded_weight = gates[..., None] * output_expanded
+            output = output_expanded_weight.sum(1)
+            """
             output = torch.bmm(
                 gates[:, None, :],
-                output_expanded
-            ).squeeze(1)
+                output_expanded.to(dtype=gates.dtype)
+            ).squeeze(1).to(dtype=output_expanded.dtype)
+            """
         else:
             output_expanded = None
 

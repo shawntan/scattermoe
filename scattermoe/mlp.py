@@ -34,6 +34,9 @@ class GLUMLP(nn.Module):
             sorted_expert_idxs, sorted_scattered_idxs = kernels.ops.flatten_and_sort(expert_idxs)
             padded_block_idxs, expert_offsets = kernels.ops.padded_block_indices(sorted_expert_idxs, self.num_experts)
 
+        def check_vals(x):
+            assert not (torch.isnan(x) | torch.isinf(x)).any()
+    
         h, gates  = self.experts(
             x, self.top_k,
             sorted_expert_idxs, sorted_scattered_idxs,
@@ -41,13 +44,13 @@ class GLUMLP(nn.Module):
             grouped_out=True
         ).chunk(2, dim=-1)
         h = self.activation(gates) * h
+        check_vals(h)
         y = self.output_experts(
             h, 1, sorted_expert_idxs, sorted_scattered_idxs,
             padded_block_idxs, expert_offsets,
             grouped_in=True,
             gates=expert_p,
         )
-        y = y.view(*x_shape[:-1], y.size(-1))
         return y
 
 

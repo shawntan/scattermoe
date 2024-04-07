@@ -38,6 +38,7 @@ def padded_block_indices(sorted_experts_idxs: torch.Tensor, k: int, N_BLOCK_SIZE
 def _scatter2scatter_configs():
     return [
         triton.Config({'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_N': 16, 'BLOCK_K': 16}, num_stages=4, num_warps=4),
     ]
 
 @triton.autotune(configs=_scatter2scatter_configs(), key=['M', 'N', 'K'], )
@@ -60,19 +61,22 @@ def _scatter2scatter(
     x_grouped: tl.constexpr, y_grouped: tl.constexpr,
     NO_K_MASK: tl.constexpr, NO_N_MASK: tl.constexpr
 ):
-    pid = tl.program_id(axis=0)
+    # pid = tl.program_id(axis=0)
+    # N_BLOCK_COUNT = tl.cdiv(N, BLOCK_N)
+    # M_block_id = pid // N_BLOCK_COUNT
+    # N_block_id = pid % N_BLOCK_COUNT
+    M_block_id = tl.program_id(axis=0)
+    N_block_id = tl.program_id(axis=1)
 
-    N_BLOCK_COUNT = tl.cdiv(N, BLOCK_N)
-    M_block_id = pid // N_BLOCK_COUNT
-    N_block_id = pid % N_BLOCK_COUNT
     M_range = tl.arange(0, BLOCK_M)
     block_start_idx = tl.load(block_start_idx_ptr + M_block_id)
     # M_block = tl.max_contiguous((block_start_idx + M_range) % OUT_M, BLOCK_M)
-    M_block = tl.max_contiguous(block_start_idx + M_range, BLOCK_M)
+    # M_block = tl.max_contiguous(block_start_idx + M_range, BLOCK_M)
+    M_block = block_start_idx + M_range
     E_idxs = tl.load(expert_idxs_ptr + M_block, mask=M_block < (FAN_OUT * M), other=E)
     E_idx = tl.min(E_idxs)
     E_mask = E_idxs == E_idx
-    M_idx = tl.load(grouped_idx_ptr + M_block, mask=E_mask, other=0)
+    M_idx = tl.load(grouped_idx_ptr + M_block, mask=E_mask, other=0).to(tl.int64)
     if x_grouped:
         M_in_idx = M_block
     else:
@@ -83,13 +87,11 @@ def _scatter2scatter(
     else:
         M_out_idx = M_idx
 
-    K_block = tl.arange(0, BLOCK_K)
-
-    N_block = N_block_id * BLOCK_N  + tl.arange(0, BLOCK_N)
+    # K_block = tl.arange(0, BLOCK_K)
+    N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)
     N_mask = N_block < N
     # N_block = tl.max_contiguous(tl.multiple_of(N_block % N, BLOCK_N), BLOCK_N)
-    # N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
-
+    K_block = tl.arange(0, BLOCK_K).to(tl.int64)
     X_blk_ptrs = X_ptr + M_in_idx[:, None] * stride_xm + K_block[None, :] * stride_xk
     W_blk_ptrs = W_ptr + K_block[:, None] * stride_wk + N_block[None, :] * stride_wn + E_idx * stride_we
 
@@ -98,20 +100,20 @@ def _scatter2scatter(
     for K_block_id in range(0, iters):
         if NO_K_MASK:
             x = tl.load(X_blk_ptrs, mask=E_mask[:, None])
-            if NO_N_MASK or ((N_block_id + 1) * BLOCK_N) < N:
+            if NO_N_MASK:
                 w = tl.load(W_blk_ptrs)
             else:
                 w = tl.load(W_blk_ptrs, mask=N_mask[None, :])
         else:
-            K_mask = (K_block_id * BLOCK_K + K_block) < K
+            K_mask = K_block < K
             x = tl.load(X_blk_ptrs, mask=E_mask[:, None] & K_mask[None, :])
             w = tl.load(W_blk_ptrs, mask=K_mask[:, None] & N_mask[None, :])
+        acc += tl.dot(x, w, allow_tf32=allow_tf32, out_dtype=ACC_TYPE)
         X_blk_ptrs += BLOCK_K * stride_xk
         W_blk_ptrs += BLOCK_K * stride_wk
-        acc += tl.dot(x, w, allow_tf32=allow_tf32, out_dtype=ACC_TYPE)
-
     Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
     tl.store(Y_blk_ptrs, acc, mask=E_mask[:, None] & N_mask[None, :])
+
 
 def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
                     padded_block_idxs, x_grouped=False, y_grouped=False,
@@ -123,14 +125,14 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
     y_dim = W.size(-1)
     L_scattered = sorted_expert_idxs.size(0)
     if out is None:
-        O = torch.empty((L_scattered, y_dim), device=X.device, dtype=X.dtype)
+        O = torch.zeros((L_scattered, y_dim), device=X.device, dtype=X.dtype)
     else:
         assert out.size(0) == L_scattered and out.size(1) == y_dim
         O = out
 
     def grid(META):
         grid_num = (
-            padded_block_idxs.size(0) *
+            padded_block_idxs.size(0),
             triton.cdiv(META['N'], META['BLOCK_N']),
         )
         return grid_num
@@ -143,27 +145,27 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
           "BLOCK_M", BLOCK_M,
           "grouped", (x_grouped, y_grouped))
     """
-    _scatter2scatter[grid](
-        # X_ptr, stride_xm, stride_xk,
-        X, X.stride(0), X.stride(1),
-        # W_ptr, stride_we, stride_wk, stride_wn,
-        W, W.stride(0), W.stride(1), W.stride(2),
-        # Y_ptr, stride_ym, stride_yn,
-        O, O.stride(0), O.stride(1),
-        grouped_idx_ptr=sorted_scattered_idxs,
-        expert_idxs_ptr=sorted_expert_idxs,
-        block_start_idx_ptr=padded_block_idxs,
-        FAN_OUT=k,
-        M=X.size(0),
-        K=X.size(1),
-        N=O.size(1), E=W.size(0),
-        BLOCK_M=BLOCK_M,
-        ACC_TYPE=tl.float32,
-        OUT_M=O.size(0),
-        allow_tf32=True,
-        x_grouped=x_grouped, y_grouped=y_grouped,
-    )
-    return O
+    with torch.cuda.device(X.device):
+        _scatter2scatter[grid](
+            # X_ptr, stride_xm, stride_xk,
+            X, X.stride(0), X.stride(1),
+            # W_ptr, stride_we, stride_wk, stride_wn,
+            W, W.stride(0), W.stride(1), W.stride(2),
+            # Y_ptr, stride_ym, stride_yn,
+            O, O.stride(0), O.stride(1),
+            grouped_idx_ptr=sorted_scattered_idxs,
+            expert_idxs_ptr=sorted_expert_idxs,
+            block_start_idx_ptr=padded_block_idxs,
+            FAN_OUT=k,
+            M=X.size(0), K=X.size(1),
+            OUT_M=O.size(0), N=O.size(1),
+            E=W.size(0),
+            BLOCK_M=BLOCK_M,
+            ACC_TYPE=tl.float32,
+            allow_tf32=False,
+            x_grouped=x_grouped, y_grouped=y_grouped,
+        )
+        return O
 
 
 def _config_XtY():

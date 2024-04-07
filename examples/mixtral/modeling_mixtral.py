@@ -53,9 +53,6 @@ from transformers.utils import (
 from transformers.utils.import_utils import is_torch_fx_available
 from .configuration_mixtral import MixtralConfig
 
-from megablocks.layers.dmoe import ParallelDroplessMLP
-from megablocks.layers.arguments import Arguments
-
 import scattermoe
 
 if is_flash_attn_2_available():
@@ -681,74 +678,28 @@ class MixtralSparseMoeBlock(nn.Module):
 
 
     def forward(self, hidden_states: torch.Tensor):
-        print(hidden_states.size())
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        def check_vals(x):
+            assert not (torch.isnan(x) | torch.isinf(x)).any()
+    
+        check_vals(hidden_states)
         # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
+        check_vals(router_logits)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float32)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
+        check_vals(routing_weights)
         routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         # we cast back to the input dtype
-        routing_weights = routing_weights.to(hidden_states.dtype)
+        # routing_weights = routing_weights.to(hidden_states.dtype)
+        check_vals(routing_weights)
         final_hidden_states = self.moe_mlp(hidden_states, routing_weights, selected_experts)
+        check_vals(final_hidden_states)
         final_hidden_states = final_hidden_states.view(batch_size, sequence_length, hidden_dim)
+        print(final_hidden_states.dtype)
         return final_hidden_states, router_logits
-
-class MegablocksMixtralSparseMoeBlock(nn.Module):
-    """
-    This implementation is
-    strictly equivalent to standard MoE with full capacity (no
-    dropped tokens). It's faster since it formulates MoE operations
-    in terms of block-sparse operations to accomodate imbalanced
-    assignments of tokens to experts, whereas standard MoE either
-    (1) drop tokens at the cost of reduced performance or (2) set
-    capacity factor to number of experts and thus waste computation
-    and memory on padding.
-    """
-
-    def __init__(self, config):
-        super().__init__()
-        self.hidden_dim = config.hidden_size
-        self.ffn_dim = config.intermediate_size
-        self.num_experts = config.num_local_experts
-        self.top_k = config.num_experts_per_tok
-
-        # gating
-        self.gate = nn.Linear(self.hidden_dim, self.num_experts, bias=False)
-
-
-        self.moe_mlp = ParallelDroplessMLP(Arguments(
-            hidden_size=self.hidden_dim,
-            ffn_hidden_size=self.ffn_dim,
-            moe_num_experts=self.num_experts,
-            moe_top_k=self.top_k,
-            moe_capacity_factor=1,
-            # init_method=partial(torch.nn.init.normal_, mean=0.0, std=0.1),
-            mlp_type='glu',
-            mlp_impl='sparse',
-            fp16=False,
-            bf16=False,
-            bias=False
-        ))
-
-    def forward(self, hidden_states: torch.Tensor):
-        """ """
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
-        # router_logits: (batch * sequence_length, n_experts)
-        router_logits = self.gate(hidden_states)
-
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        # we cast back to the input dtype
-        routing_weights = routing_weights.to(hidden_states.dtype)
-        final_hidden_states = self.moe_mlp(hidden_states, router_logits, routing_weights,  selected_experts)
-        final_hidden_states = final_hidden_states.view(batch_size, sequence_length, hidden_dim)
-        return final_hidden_states, router_logits
-
 
 class MixtralDecoderLayer(nn.Module):
     def __init__(self, config: MixtralConfig, layer_idx: int):
@@ -871,7 +822,7 @@ class MixtralPreTrainedModel(PreTrainedModel):
                 module.weight.data[module.padding_idx].zero_()
     
     @classmethod
-    def _load_pretrained_model(
+    def __load_pretrained_model(
         cls,
 		model,
         state_dict,
@@ -1560,6 +1511,7 @@ class MixtralForSequenceClassification(MixtralPreTrainedModel):
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = BCEWithLogitsLoss()
                 loss = loss_fct(pooled_logits, labels)
+
         if not return_dict:
             output = (pooled_logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
