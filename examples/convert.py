@@ -4,8 +4,10 @@ import gc
 from mixtral.modeling_mixtral import MixtralModel, MixtralForCausalLM
 from mixtral.configuration_mixtral import MixtralConfig
 MODEL_NAME = "mistralai/Mixtral-8x7B-v0.1"
+import sys
 
 if __name__ == "__main__":
+    target_directory = sys.argv[1]
     dtype = torch.bfloat16
     config = MixtralConfig.from_pretrained(MODEL_NAME, low_cpu_mem_usage=True, torch_dtype=dtype)
     num_experts = config.num_local_experts
@@ -33,5 +35,5 @@ if __name__ == "__main__":
                     p.data[i, out_dim:, :] = state_dict_orig.pop(w1_param_name)
     assert len(state_dict_orig) == 0
     print("Saving to file.")
-    model.to(dtype=torch.bfloat16).save_pretrained("./converted/", save_config=True)
+    model.to(dtype=torch.bfloat16).save_pretrained(target_directory, save_config=True)
 
