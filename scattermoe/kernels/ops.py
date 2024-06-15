@@ -174,6 +174,7 @@ def group_bwd_W(DY, X, expert_offsets, E):
         return grid
     
     with torch.cuda.device(DY.device):
+        print("before _groupXtY")
         _groupXtY[grid](
             # DY_ptr, stride_dym, stride_dyk,
             DY, DY.stride(0), DY.stride(1),
@@ -187,14 +188,15 @@ def group_bwd_W(DY, X, expert_offsets, E):
             M=DY.size(0), N=DY.size(-1), K=X.size(-1),
             # ACC_TYPE: tl.constexpr,
             ACC_TYPE=tl.float32,
-            allow_tf32=True
+            allow_tf32=False
         )
+        print("after _groupXtY")
         return DW
 
 @triton.autotune(configs=_config_XtY(), key=['M', 'N', 'K'], )
 @triton.heuristics({
-    "NO_K_MASK": lambda args: (args['K'] % args['BLOCK_K']) == 0,
-    "NO_N_MASK": lambda args: (args['N'] % args['BLOCK_N']) == 0,
+    "NO_K_MASK": lambda args: False, # (args['K'] % args['BLOCK_K']) == 0,
+    "NO_N_MASK": lambda args: False, # (args['N'] % args['BLOCK_N']) == 0,
 })
 @triton.jit
 def _groupXtY(

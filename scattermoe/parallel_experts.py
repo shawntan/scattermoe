@@ -47,12 +47,19 @@ class ParallelLinear(torch.autograd.Function):
          padded_block_idxs, expert_offsets,
          gates, output_expanded) = ctx.saved_tensors
         k = ctx.k
+        if gates is None:
+            print("Doing backward", k)
+        else:
+            print("Doing backward", k, gates.size())
+        print(torch.bincount(sorted_expert_idxs, minlength=expert_weights.size(0)))
         grouped_in = ctx.grouped_in
         grouped_out = ctx.grouped_out
         # print("backward")
         if gates is not None:
             # calculate gates gradient
+            print("gates bmm backward")
             d_gates = torch.bmm(output_expanded, grad_out[:, :, None]).squeeze(-1)
+            torch.cuda.synchronize()
             gates_flat = gates.flatten()
             gate_fan = gates.size(1)
             # print("expanded and grouping")
@@ -66,20 +73,27 @@ class ParallelLinear(torch.autograd.Function):
         if grouped_out:
             grouped_grad_out = grad_out
         else:
+            print("do out grouping")
             grouped_grad_out = kernels.ops.group(grad_out, sorted_scattered_idxs,
                                                  fan_out=gate_fan, coeff=gates_flat,
                                                  out=grouped_grad_out)
+            torch.cuda.synchronize()
         if grouped_in:
             grouped_x = x
             d_expanded_input = None
         else:
+            print("do in grouping")
             grouped_x = kernels.ops.group(x, sorted_scattered_idxs, fan_out=k)
             d_expanded_input = grouped_x
+            torch.cuda.synchronize()
+        print("weight gradients")
         d_weights = kernels.ops.group_bwd_W(
             DY=grouped_grad_out, X=grouped_x,
             expert_offsets=expert_offsets,
             E=expert_weights.size(0)
         )
+        torch.cuda.synchronize()
+        print("input gradients")
         d_expanded_input = kernels.ops.scatter2scatter(
             X=grouped_grad_out, x_grouped=True,
             W=expert_weights.permute(0, 2, 1),
