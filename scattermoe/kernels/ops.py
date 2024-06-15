@@ -193,7 +193,7 @@ def group_bwd_W(DY, X, expert_offsets, E):
         print("after _groupXtY")
         return DW
 
-@triton.autotune(configs=_config_XtY(), key=['M', 'N', 'K'], )
+@triton.autotune(configs=_config_XtY(), key=['N', 'K'], )
 @triton.heuristics({
     "NO_K_MASK": lambda args: False, # (args['K'] % args['BLOCK_K']) == 0,
     "NO_N_MASK": lambda args: False, # (args['N'] % args['BLOCK_N']) == 0,
@@ -232,11 +232,11 @@ def _groupXtY(
 
         K_block = K_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
         K_mask = K_block < K
-        K_block = tl.max_contiguous(tl.multiple_of(K_block % K, BLOCK_K), BLOCK_K)
+        # K_block = tl.max_contiguous(tl.multiple_of(K_block % K, BLOCK_K), BLOCK_K)
 
         N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
         N_mask = N_block < N
-        N_block = tl.max_contiguous(tl.multiple_of(N_block % N, BLOCK_N), BLOCK_N)
+        # N_block = tl.max_contiguous(tl.multiple_of(N_block % N, BLOCK_N), BLOCK_N)
 
         M_idxs = M_block
         xt_blk_ptrs = X_ptr + K_block[:, None] * stride_xn + M_idxs[None, :] * stride_xm
@@ -245,18 +245,19 @@ def _groupXtY(
         acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=ACC_TYPE)
         iters = tl.cdiv(end_idx - start_idx, BLOCK_M)
         for i in range(0, iters):
-            M_mask = (i * BLOCK_M + M_block) < end_idx
-            if NO_K_MASK:
-                xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
-            else:
-                xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None] & M_mask[None, :])
-            if NO_N_MASK:
-                dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
-            else:
-                dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
+            M_mask = M_idxs < end_idx
+            # if NO_K_MASK:
+            #     xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
+            # else:
+            xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None] & M_mask[None, :])
+            # if NO_N_MASK:
+            #     dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
+            # else:
+            dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
             # acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
             xt_blk_ptrs += BLOCK_M * stride_xm
             dy_blk_ptrs += BLOCK_M * stride_dym
+            M_idxs += BLOCK_M
             acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
 
 
