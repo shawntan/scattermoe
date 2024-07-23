@@ -110,10 +110,11 @@ class ParallelLinear(torch.autograd.Function):
 def parallel_linear(inputs, expert_weights, k,
                     sorted_expert_idxs, sorted_scattered_idxs,
                     padded_block_idxs, expert_offsets,
-                    gates=None):
+                    gates=None, grouped_in=False, grouped_out=False):
     results = ParallelLinear.apply(inputs, expert_weights, k,
                                    sorted_expert_idxs, sorted_scattered_idxs,
-                                   padded_block_idxs, expert_offsets, gates)
+                                   padded_block_idxs, expert_offsets, gates,
+                                   grouped_in, grouped_out)
     return results
 
 class ParallelExperts(nn.Module):
@@ -139,10 +140,10 @@ class ParallelExperts(nn.Module):
                 padded_block_idxs, expert_offsets,
                 gates=None, grouped_in=False, grouped_out=False):
 
-        results = ParallelLinear.apply(
+        results = parallel_linear(
             inputs, self.weight.permute(0, 2, 1), k,
             sorted_expert_idxs, sorted_scattered_idxs,
             padded_block_idxs, expert_offsets,
-            gates, grouped_in, grouped_out
+            gates=gates, grouped_in=grouped_in, grouped_out=grouped_out
         )
         return results
