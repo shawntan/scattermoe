@@ -35,6 +35,17 @@ Y = mlp(
 )
 ```
 
+## Bibtex
+If you use ScatterMoE in your project, cite us!
+```bibtex
+@article{tan2024scattered,
+  title={Scattered Mixture-of-Experts Implementation},
+  author={Tan, Shawn and Shen, Yikang and Panda, Rameswar and Courville, Aaron},
+  journal={arXiv preprint arXiv:2403.08245},
+  year={2024}
+}
+```
+
 Enjoy!
 
 -----
