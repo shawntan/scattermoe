@@ -4,6 +4,7 @@ import triton.language as tl
 from torch.nn import functional as F
 
 BLOCK_M = 128
+ALLOW_TF32 = False
 
 @torch.jit.script
 def flatten_and_sort(expert_idxs:torch.Tensor):
@@ -53,12 +54,14 @@ def _scatter2scatter(
     grouped_idx_ptr, expert_idxs_ptr, block_start_idx_ptr,
     FAN_OUT: tl.constexpr,
     M, K: tl.constexpr, N: tl.constexpr, E: tl.constexpr,
+    E_idxs_size: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     ACC_TYPE: tl.constexpr,
     OUT_M,
     allow_tf32: tl.constexpr,
     x_grouped: tl.constexpr, y_grouped: tl.constexpr,
-    NO_K_MASK: tl.constexpr, NO_N_MASK: tl.constexpr
+    NO_K_MASK: tl.constexpr, NO_N_MASK: tl.constexpr,
+    DEBUG: tl.constexpr
 ):
     pid = tl.program_id(axis=0)
 
@@ -69,9 +72,11 @@ def _scatter2scatter(
     block_start_idx = tl.load(block_start_idx_ptr + M_block_id)
     # M_block = tl.max_contiguous((block_start_idx + M_range) % OUT_M, BLOCK_M)
     M_block = tl.max_contiguous(block_start_idx + M_range, BLOCK_M)
-    E_idxs = tl.load(expert_idxs_ptr + M_block, mask=M_block < (FAN_OUT * M), other=E)
+    M_mask = M_block < E_idxs_size
+    E_idxs = tl.load(expert_idxs_ptr + M_block, mask=M_mask, other=E).to(tl.int64)
+    # E_idxs = tl.load(expert_idxs_ptr + M_block, mask=M_block < (FAN_OUT * M), other=E)
     E_idx = tl.min(E_idxs)
-    E_mask = E_idxs == E_idx
+    E_mask = (E_idxs == E_idx) & M_mask
     M_idx = tl.load(grouped_idx_ptr + M_block, mask=E_mask, other=0)
     if x_grouped:
         M_in_idx = M_block
@@ -89,33 +94,57 @@ def _scatter2scatter(
     N_mask = N_block < N
     # N_block = tl.max_contiguous(tl.multiple_of(N_block % N, BLOCK_N), BLOCK_N)
     # N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
-
+    W_ptr_ = W_ptr
+    W_ptr = W_ptr + E_idx * stride_we
     X_blk_ptrs = X_ptr + M_in_idx[:, None] * stride_xm + K_block[None, :] * stride_xk
-    W_blk_ptrs = W_ptr + K_block[:, None] * stride_wk + N_block[None, :] * stride_wn + E_idx * stride_we
+    W_blk_ptrs = W_ptr + K_block[:, None] * stride_wk + N_block[None, :] * stride_wn 
 
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_TYPE)
     iters = tl.cdiv(K, BLOCK_K)
-    for K_block_id in range(0, iters):
-        if NO_K_MASK:
-            x = tl.load(X_blk_ptrs, mask=E_mask[:, None])
-            if NO_N_MASK or K_block_id < (iters - 1):
-                w = tl.load(W_blk_ptrs)
-            else:
-                w = tl.load(W_blk_ptrs, mask=N_mask[None, :])
-        else:
-            K_mask = (K_block_id * BLOCK_K + K_block) < K
-            x = tl.load(X_blk_ptrs, mask=E_mask[:, None] & K_mask[None, :])
-            w = tl.load(W_blk_ptrs, mask=K_mask[:, None] & N_mask[None, :])
+    for K_block_id in range(iters):
+        # if NO_K_MASK:
+        #     x = tl.load(X_blk_ptrs, mask=E_mask[:, None])
+        #     if NO_N_MASK or K_block_id < (iters - 1):
+        #         w = tl.load(W_blk_ptrs)
+        #     else:
+        #         w = tl.load(W_blk_ptrs, mask=N_mask[None, :])
+        # else:
+        K_mask = (K_block_id * BLOCK_K + K_block) < K
+        x = tl.load(X_blk_ptrs, mask=E_mask[:, None] & K_mask[None, :])
+        w = tl.load(W_blk_ptrs, mask=K_mask[:, None] & N_mask[None, :])
+        # TODO acc += tl.dot(x, w, allow_tf32=allow_tf32, out_dtype=ACC_TYPE)
+        # TODO remove
+        dot_result = tl.dot(x, w, allow_tf32=allow_tf32, out_dtype=ACC_TYPE)
+        # acc += tl.where(E_mask[:, None], dot_result, 0.)
+        acc += dot_result
         X_blk_ptrs += BLOCK_K * stride_xk
         W_blk_ptrs += BLOCK_K * stride_wk
-        acc += tl.dot(x, w, allow_tf32=allow_tf32, out_dtype=ACC_TYPE)
+
+    if DEBUG:
+        dotsum = tl.sum(acc)
+        dotrowmax = tl.max(tl.sum(acc, -1))
+        # if tl.max(tl.abs(x)) != 0. and tl.max(tl.abs(w)) != 0.:
+        if tl.abs(dotsum) > 0 and E_idx + 1 != dotrowmax:
+            E_idx_val = tl.load(W_ptr_ + E_idx * stride_we)
+            tl.device_print("E_idx dotsum:", 1e6 * (E_idx + 1) + 1e3 * E_idx_val + dotrowmax)
+            """
+            if E_idx + 1 != tl.max(w):
+                E_idx_val = tl.load(W_ptr_ + E_idx * stride_we + tl.arange(0, 4) - 2)
+                # tl.device_print("before E_ptr next:", E_idx_val)
+                # E_idx_val = tl.load(W_ptr_ + tl.arange(0, 4) - 2)
+                tl.device_print("before E_ptr next:", E_idx_val)
+            """
+        diff = acc > E
+        if tl.sum(diff) > 0:
+            tl.device_print("acc over", tl.sum(tl.where(diff, acc, 0.)))
 
     Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
+    # if tl.min(E_idxs) == tl.max(E_idxs):
     tl.store(Y_blk_ptrs, acc, mask=E_mask[:, None] & N_mask[None, :])
 
 def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
                     padded_block_idxs, x_grouped=False, y_grouped=False,
-                    out=None):
+                    out=None, debug=False):
     assert sorted_scattered_idxs.size(0) == sorted_expert_idxs.size(0)
     assert sorted_scattered_idxs.size(0) == X.size(0) * k
     # Pre-kernel setup
@@ -123,7 +152,7 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
     y_dim = W.size(-1)
     L_scattered = sorted_expert_idxs.size(0)
     if out is None:
-        O = torch.empty((L_scattered, y_dim), device=X.device, dtype=X.dtype)
+        O = torch.zeros((L_scattered, y_dim), device=X.device, dtype=X.dtype)
     else:
         assert out.size(0) == L_scattered and out.size(1) == y_dim
         O = out
@@ -149,11 +178,13 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
             M=X.size(0),
             K=X.size(1),
             N=O.size(1), E=W.size(0),
+            E_idxs_size=sorted_expert_idxs.size(0),
             BLOCK_M=BLOCK_M,
             ACC_TYPE=tl.float32,
             OUT_M=O.size(0),
-            allow_tf32=True,
+            allow_tf32=ALLOW_TF32,
             x_grouped=x_grouped, y_grouped=y_grouped,
+            DEBUG=debug
         )
         return O
 
@@ -187,7 +218,7 @@ def group_bwd_W(DY, X, expert_offsets, E):
             M=DY.size(0), N=DY.size(-1), K=X.size(-1),
             # ACC_TYPE: tl.constexpr,
             ACC_TYPE=tl.float32,
-            allow_tf32=True
+            allow_tf32=ALLOW_TF32
         )
         return DW
 
@@ -314,7 +345,7 @@ def _group(
     N_block_id = pid
     N_blk = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
     N_mask = N_blk < N
-    N_blk = tl.max_contiguous(tl.multiple_of(N_blk % N, BLOCK_N), BLOCK_N)
+    # N_blk = tl.max_contiguous(tl.multiple_of(N_blk % N, BLOCK_N), BLOCK_N)
     N_idx = tl.load(grouped_idx_ptr + N_blk, mask=N_mask, other=0)
 
     K_blk = tl.arange(0, BLOCK_K)
@@ -331,7 +362,6 @@ def _group(
             if has_coeff:
                 block *= c
             tl.store(tgt_blk_ptrs, block, mask=N_mask[:, None])
-
         else:
             K_mask = (i * BLOCK_K + K_blk) < K
             mask = N_mask[:, None] & K_mask[None, :]

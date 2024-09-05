@@ -50,6 +50,7 @@ class ParallelLinear(torch.autograd.Function):
         grouped_in = ctx.grouped_in
         grouped_out = ctx.grouped_out
         # print("backward")
+        print(grad_out)
         if gates is not None:
             # calculate gates gradient
             d_gates = torch.bmm(output_expanded, grad_out[:, :, None]).squeeze(-1)
@@ -66,20 +67,32 @@ class ParallelLinear(torch.autograd.Function):
         if grouped_out:
             grouped_grad_out = grad_out
         else:
-            grouped_grad_out = kernels.ops.group(grad_out, sorted_scattered_idxs,
-                                                 fan_out=gate_fan, coeff=gates_flat,
-                                                 out=grouped_grad_out)
+            # TODO
+            # grouped_grad_out = kernels.ops.group(grad_out, sorted_scattered_idxs,
+            #                                      fan_out=gate_fan,
+            #                                      coeff=gates_flat,
+            #                                      out=grouped_grad_out)
+            shuffled_grad_out = grad_out[sorted_scattered_idxs // gate_fan]
+
+            grouped_grad_out = shuffled_grad_out * gates_flat[sorted_scattered_idxs][:, None]
+
+
         if grouped_in:
             grouped_x = x
             d_expanded_input = None
         else:
-            grouped_x = kernels.ops.group(x, sorted_scattered_idxs, fan_out=k)
+            # TODO grouped_x = kernels.ops.group(x, sorted_scattered_idxs, fan_out=k)
+            grouped_x = x[sorted_scattered_idxs // k]
             d_expanded_input = grouped_x
-        d_weights = kernels.ops.group_bwd_W(
-            DY=grouped_grad_out, X=grouped_x,
-            expert_offsets=expert_offsets,
-            E=expert_weights.size(0)
-        )
+
+        d_weights = torch.zeros_like(expert_weights)
+        # TODO
+        # kernels.ops.group_bwd_W(
+        #     DY=grouped_grad_out, X=grouped_x,
+        #     expert_offsets=expert_offsets,
+        #     E=expert_weights.size(0)
+        # )
+        # assert torch.allclose((grouped_grad_out - 1).sum(), torch.tensor(0., device=grouped_grad_out.device)) # TODO
         d_expanded_input = kernels.ops.scatter2scatter(
             X=grouped_grad_out, x_grouped=True,
             W=expert_weights.permute(0, 2, 1),
@@ -88,14 +101,25 @@ class ParallelLinear(torch.autograd.Function):
             sorted_scattered_idxs=sorted_scattered_idxs,
             k=1,
             y_grouped=grouped_in,
-            out=d_expanded_input # Reuse grouped_x buffer
+            out=d_expanded_input, # Reuse grouped_x buffer
+            debug=gates is None
         )
 
+        if gates is None:
+            gt = grouped_grad_out[:, 0] * (sorted_expert_idxs + 1.)
+            print("Error:", torch.max((gt - d_expanded_input[sorted_scattered_idxs, 0]).abs()))
+            gt_scattered = torch.empty_like(gt)
+            gt_scattered[sorted_scattered_idxs] = gt
+            print(gt_scattered.view(x.size(0), k).sum(1))
+
+        # d_expanded_input = d_expanded_input[sorted_scattered_idxs]
+        # buf = torch.zeros_like(d_expanded_input)
+        # buf[sorted_scattered_idxs] = d_expanded_input
+        # d_expanded_input = buf
         if k == 1:
             d_input = d_expanded_input
         else:
             d_input = d_expanded_input.view(x.size(0), k, d_expanded_input.size(-1)).sum(-2)
-        # print("backward end.")
         return (
             # x, expert_weights, k,
             d_input, d_weights, None,
@@ -110,10 +134,13 @@ class ParallelLinear(torch.autograd.Function):
 def parallel_linear(inputs, expert_weights, k,
                     sorted_expert_idxs, sorted_scattered_idxs,
                     padded_block_idxs, expert_offsets,
-                    gates=None):
-    results = ParallelLinear.apply(inputs, expert_weights, k,
-                                   sorted_expert_idxs, sorted_scattered_idxs,
-                                   padded_block_idxs, expert_offsets, gates)
+                    gates=None, grouped_in=False, grouped_out=False):
+    results = ParallelLinear.apply(
+        inputs, expert_weights, k,
+        sorted_expert_idxs, sorted_scattered_idxs,
+        padded_block_idxs, expert_offsets, gates,
+        grouped_in, grouped_out
+    )
     return results
 
 class ParallelExperts(nn.Module):
