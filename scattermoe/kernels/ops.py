@@ -247,7 +247,7 @@ def _groupXtY(
     num0 = tl.num_programs(0)
     num1 = tl.num_programs(1)
     # pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
-    pid0, pid1 = tl.swizzle2d(pid1, pid0, num1, num0, 4)
+    pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
 
     K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
     E_idx = pid0 // K_BLOCK_COUNT
