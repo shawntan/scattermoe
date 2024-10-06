@@ -4,6 +4,7 @@ import triton.language as tl
 from torch.nn import functional as F
 
 BLOCK_M = 128
+ALLOW_TF32 = False
 
 @torch.library.custom_op("scattermoe::bincount", mutates_args={})
 def compileable_bincount(x: torch.Tensor, minlength: int) -> torch.Tensor:
@@ -175,7 +176,7 @@ def scatter2scatter_compileable(
         BLOCK_M=BLOCK_M,
         ACC_TYPE=tl.float32,
         OUT_M=O.size(0),
-        allow_tf32=True,
+        allow_tf32=ALLOW_TF32,
         x_grouped=x_grouped, y_grouped=y_grouped,
     )
 
@@ -209,7 +210,7 @@ def group_bwd_W(DY, X, expert_offsets, E):
             M=DY.size(0), N=DY.size(-1), K=X.size(-1),
             # ACC_TYPE: tl.constexpr,
             ACC_TYPE=tl.float32,
-            allow_tf32=True
+            allow_tf32=ALLOW_TF32
         )
         return DW
 
