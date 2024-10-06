@@ -135,21 +135,29 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
         assert out.size(0) == L_scattered and out.size(1) == y_dim
         O = out
 
+
+    with torch.cuda.device(X.device):
+        scatter2scatter_compileable(O, W, X, k, padded_block_idxs, sorted_expert_idxs, sorted_scattered_idxs,
+                                    x_grouped, y_grouped)
+        return O
+
+
+@torch.library.custom_op("scattermoe::scatter2scatter", mutates_args={"O"})
+def scatter2scatter_compileable(
+        O: torch.Tensor,
+        W: torch.Tensor,
+        X: torch.Tensor,
+        k: int,
+        padded_block_idxs: torch.Tensor,
+        sorted_expert_idxs: torch.Tensor,
+        sorted_scattered_idxs: torch.Tensor,
+        x_grouped: bool, y_grouped: bool):
     def grid(META):
         grid_num = (
             padded_block_idxs.size(0) *
             triton.cdiv(META['N'], META['BLOCK_N']),
         )
         return grid_num
-    with torch.cuda.device(X.device):
-        scatter2scatter_compileable(O, W, X, grid, k, padded_block_idxs, sorted_expert_idxs, sorted_scattered_idxs,
-                                    x_grouped, y_grouped)
-        return O
-
-
-@torch.library.custom_op("scattermoe::scatter2scatter", mutates_args={"O"})
-def scatter2scatter_compileable(O, W, X, grid, k, padded_block_idxs, sorted_expert_idxs, sorted_scattered_idxs,
-                                x_grouped, y_grouped):
     _scatter2scatter[grid](
         # X_ptr, stride_xm, stride_xk,
         X, X.stride(0), X.stride(1),
