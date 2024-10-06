@@ -47,6 +47,10 @@ If you use ScatterMoE in your project, cite us!
 ```
 
 Enjoy!
+----
+###  Version 0.2.0
+
+- Made compileable.
 
 -----
 ### More examples
