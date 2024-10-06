@@ -10,7 +10,6 @@ ALLOW_TF32 = False
 def compileable_bincount(x: torch.Tensor, minlength: int) -> torch.Tensor:
         return x.bincount(minlength=minlength)
 
-
 @compileable_bincount.register_fake
 def _(x: torch.Tensor, minlength: int) -> torch.Tensor:
     return torch.empty(minlength, dtype=torch.long, device=x.device)
@@ -189,30 +188,39 @@ def _config_XtY():
 def group_bwd_W(DY, X, expert_offsets, E):
     DWt = torch.zeros((E, DY.size(-1), X.size(-1)), device=DY.device, dtype=DY.dtype)
     DW = DWt.permute(0, 2, 1)
+    groupXtY_compileable(DW, DY, X, expert_offsets)
+    return DW
+
+
+@torch.library.custom_op("scattermoe::groupXtY", mutates_args={"DW"})
+def groupXtY_compileable(
+        DW: torch.Tensor,
+        DY: torch.Tensor,
+        X: torch.Tensor,
+        expert_offsets: torch.Tensor):
     def grid(META):
         grid = (
             E * triton.cdiv(META['K'], META['BLOCK_K']),
             triton.cdiv(META['N'], META['BLOCK_N']),
         )
         return grid
-    
-    with torch.cuda.device(DY.device):
-        _groupXtY[grid](
-            # DY_ptr, stride_dym, stride_dyk,
-            DY, DY.stride(0), DY.stride(1),
-            # X_ptr, stride_xm, stride_xn,
-            X, X.stride(0), X.stride(1),
-            # DW_ptr, stride_dwe, stride_dwk, stride_dwn,
-            DW, DW.stride(0), DW.stride(1), DW.stride(2),
-            # expert_offsets_ptr,
-            expert_offsets,
-            # K: tl.constexpr, N: tl.constexpr,
-            M=DY.size(0), N=DY.size(-1), K=X.size(-1),
-            # ACC_TYPE: tl.constexpr,
-            ACC_TYPE=tl.float32,
-            allow_tf32=ALLOW_TF32
-        )
-        return DW
+
+    _groupXtY[grid](
+        # DY_ptr, stride_dym, stride_dyk,
+        DY, DY.stride(0), DY.stride(1),
+        # X_ptr, stride_xm, stride_xn,
+        X, X.stride(0), X.stride(1),
+        # DW_ptr, stride_dwe, stride_dwk, stride_dwn,
+        DW, DW.stride(0), DW.stride(1), DW.stride(2),
+        # expert_offsets_ptr,
+        expert_offsets,
+        # K: tl.constexpr, N: tl.constexpr,
+        M=DY.size(0), N=DY.size(-1), K=X.size(-1),
+        # ACC_TYPE: tl.constexpr,
+        ACC_TYPE=tl.float32,
+        allow_tf32=True
+    )
+
 
 @triton.autotune(configs=_config_XtY(), key=['M', 'N', 'K'], )
 @triton.heuristics({
@@ -302,7 +310,6 @@ def group(A, sorted_expert_idxs, coeff=None, fan_out=1, out=None):
         Y = out
     else:
         Y = torch.empty((N, K), dtype=A.dtype, device=A.device)
-        # print("grp init:", Y.size())
     group_compileable(A, K, N, Y, coeff, coeff is not None, fan_out, sorted_expert_idxs)
     return Y
 
