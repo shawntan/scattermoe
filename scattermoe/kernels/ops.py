@@ -14,11 +14,13 @@ def compileable_bincount(x: torch.Tensor, minlength: int) -> torch.Tensor:
 def _(x: torch.Tensor, minlength: int) -> torch.Tensor:
     return torch.empty(minlength, dtype=torch.long, device=x.device)
 
+@torch.compile
 def flatten_and_sort(expert_idxs:torch.Tensor):
     flattened_expert_idxs = expert_idxs.flatten()
     sorted_expert_idxs, sorted_scattered_idxs = torch.sort(flattened_expert_idxs)
     return sorted_expert_idxs, sorted_scattered_idxs
 
+@torch.compile
 def padded_block_indices(sorted_experts_idxs: torch.Tensor, k: int, N_BLOCK_SIZE: int=BLOCK_M) :
     expert_counts = compileable_bincount(sorted_experts_idxs, minlength=k)
     padded_block_counts = ((expert_counts - 1) // N_BLOCK_SIZE) + 1
@@ -188,16 +190,17 @@ def _config_XtY():
 def group_bwd_W(DY, X, expert_offsets, E):
     DWt = torch.zeros((E, DY.size(-1), X.size(-1)), device=DY.device, dtype=DY.dtype)
     DW = DWt.permute(0, 2, 1)
-    groupXtY_compileable(DW, DY, X, expert_offsets)
+    groupXtY_compileable(E, DW, DY, X, expert_offsets)
     return DW
 
 
 @torch.library.custom_op("scattermoe::groupXtY", mutates_args={"DW"})
 def groupXtY_compileable(
+        E: int,
         DW: torch.Tensor,
         DY: torch.Tensor,
         X: torch.Tensor,
-        expert_offsets: torch.Tensor):
+        expert_offsets: torch.Tensor) -> None:
     def grid(META):
         grid = (
             E * triton.cdiv(META['K'], META['BLOCK_K']),
@@ -243,7 +246,8 @@ def _groupXtY(
     pid1 = tl.program_id(axis=1)
     num0 = tl.num_programs(0)
     num1 = tl.num_programs(1)
-    pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
+    # pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
+    pid0, pid1 = tl.swizzle2d(pid1, pid0, num1, num0, 4)
 
     K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
     E_idx = pid0 // K_BLOCK_COUNT
