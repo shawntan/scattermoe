@@ -302,21 +302,26 @@ def group(A, sorted_expert_idxs, coeff=None, fan_out=1, out=None):
     else:
         Y = torch.empty((N, K), dtype=A.dtype, device=A.device)
         # print("grp init:", Y.size())
+    return group_compileable(A, K, N, Y, coeff, fan_out, sorted_expert_idxs)
+
+
+@torch.library.custom_op("scattermoe::group", mutates_args={"Y"})
+def group_compileable(A, K, N, Y, coeff, fan_out, sorted_expert_idxs):
     def grid(META):
         grid_num = (triton.cdiv(META['N'], META['BLOCK_N']),)
         return grid_num
-    with torch.cuda.device(A.device):
-        _group[grid](
-            # A_ptr, stride_an, stride_ai,
-            A, A.stride(0), A.stride(1), coeff is not None, coeff, fan_out,
-            # Y_ptr, stride_yn, stride_yk,
-            Y, Y.stride(0), Y.stride(1),
-            # grouped_idx_ptr,
-            sorted_expert_idxs,
-            # N: tl.constexpr, K: tl.constexpr,
-            N, K
-        )
-        return Y
+    _group[grid](
+        # A_ptr, stride_an, stride_ai,
+        A, A.stride(0), A.stride(1), coeff is not None, coeff, fan_out,
+        # Y_ptr, stride_yn, stride_yk,
+        Y, Y.stride(0), Y.stride(1),
+        # grouped_idx_ptr,
+        sorted_expert_idxs,
+        # N: tl.constexpr, K: tl.constexpr,
+        N, K
+    )
+    return Y
+
 
 @triton.autotune(configs=_config_grouping(), key=['K'])
 @triton.heuristics({
