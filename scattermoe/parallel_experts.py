@@ -131,7 +131,7 @@ class ParallelExperts(nn.Module):
             self.num_experts, self.input_size, self.output_size)
 
     def reset_parameters(self) -> None:
-        nn.init.normal(self.weight, -1. / self.weight.size(2), 1. / self.weight.size(2))
+        nn.init.normal_(self.weight, std=0.02)
 
     def forward(self, inputs, k, sorted_expert_idxs, sorted_scattered_idxs,
                 padded_block_idxs, expert_offsets,
