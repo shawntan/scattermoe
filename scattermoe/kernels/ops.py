@@ -40,7 +40,7 @@ def _scatter2scatter_configs():
         triton.Config({'BLOCK_N': 128, 'BLOCK_K': 32}, num_stages=4, num_warps=4),
     ]
 
-@triton.autotune(configs=_scatter2scatter_configs(), key=['M', 'N', 'K'], )
+@triton.autotune(configs=_scatter2scatter_configs(), key=['N', 'K'], )
 @triton.heuristics({
     "NO_K_MASK": lambda args: (args['K'] % args['BLOCK_K']) == 0,
     "NO_N_MASK": lambda args: (args['N'] % args['BLOCK_N']) == 0,
@@ -160,7 +160,9 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
 
 def _config_XtY():
     return [
-        triton.Config({'BLOCK_N': 128, 'BLOCK_K': 128, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
+        triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 32}, num_stages=4, num_warps=4),
+        triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 128}, num_stages=1, num_warps=4),
+        triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 64}, num_stages=2, num_warps=4),
     ]
 
 def group_bwd_W(DY, X, expert_offsets, E):
@@ -212,7 +214,7 @@ def _groupXtY(
     pid1 = tl.program_id(axis=1)
     num0 = tl.num_programs(0)
     num1 = tl.num_programs(1)
-    pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
+    pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
 
     K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
     E_idx = pid0 // K_BLOCK_COUNT
