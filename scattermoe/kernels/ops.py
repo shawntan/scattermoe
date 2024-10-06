@@ -322,7 +322,7 @@ def _scatter2scatter(
 
 
 # custom op is needed because of https://github.com/pytorch/pytorch/issues/136394
-@torch_custom_op(f"scattermoe::scatter2scatter", mutates_args={"out"})
+@torch.library.custom_op(f"scattermoe::scatter2scatter", mutates_args={"out"})
 def _scatter2scatter_compileable(
     X: torch.Tensor,
     W: torch.Tensor,
