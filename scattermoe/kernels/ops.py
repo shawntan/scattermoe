@@ -5,15 +5,22 @@ from torch.nn import functional as F
 
 BLOCK_M = 128
 
-@torch.jit.script
+@torch.library.custom_op("scattermoe::bincount", mutates_args={})
+def compileable_bincount(x: torch.Tensor, minlength: int) -> torch.Tensor:
+        return x.bincount(minlength=minlength)
+
+
+@compileable_bincount.register_fake
+def _(x: torch.Tensor, minlength: int) -> torch.Tensor:
+    return torch.empty(minlength, dtype=torch.long, device=x.device)
+
 def flatten_and_sort(expert_idxs:torch.Tensor):
     flattened_expert_idxs = expert_idxs.flatten()
     sorted_expert_idxs, sorted_scattered_idxs = torch.sort(flattened_expert_idxs)
     return sorted_expert_idxs, sorted_scattered_idxs
 
-@torch.jit.script
 def padded_block_indices(sorted_experts_idxs: torch.Tensor, k: int, N_BLOCK_SIZE: int=BLOCK_M) :
-    expert_counts = torch.bincount(sorted_experts_idxs, minlength=k)
+    expert_counts = compileable_bincount(sorted_experts_idxs, minlength=k)
     padded_block_counts = ((expert_counts - 1) // N_BLOCK_SIZE) + 1
     padded_expert_block_end = padded_block_counts.cumsum(-1)
     expert_boundaries_end = expert_counts.cumsum(-1)
@@ -113,6 +120,7 @@ def _scatter2scatter(
     Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
     tl.store(Y_blk_ptrs, acc, mask=E_mask[:, None] & N_mask[None, :])
 
+@torch.library.custom_op("scattermoe::scatter2scatter", mutates_args={"out"})
 def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
                     padded_block_idxs, x_grouped=False, y_grouped=False,
                     out=None):

@@ -120,9 +120,6 @@ def parallel_linear(inputs, expert_weights, k,
 class ParallelExperts(nn.Module):
     def __init__(self, num_experts, input_size, output_size) -> None:
         super().__init__()
-        # self.input_experts = nn.ModuleList(
-        #     [nn.Linear(input_size, output_size, bias=bias) for _ in range(num_experts)]
-        # )
         self.weight = nn.Parameter(torch.empty(num_experts, output_size, input_size))
         self.reset_parameters()
         self.num_experts = num_experts
@@ -134,7 +131,7 @@ class ParallelExperts(nn.Module):
             self.num_experts, self.input_size, self.output_size)
 
     def reset_parameters(self) -> None:
-        nn.init.uniform_(self.weight, -1. / self.weight.size(2), 1. / self.weight.size(2))
+        nn.init.normal(self.weight, -1. / self.weight.size(2), 1. / self.weight.size(2))
 
     def forward(self, inputs, k, sorted_expert_idxs, sorted_scattered_idxs,
                 padded_block_idxs, expert_offsets,
