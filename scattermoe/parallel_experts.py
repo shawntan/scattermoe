@@ -11,8 +11,10 @@ class ParallelLinear(torch.autograd.Function):
         gates=None, grouped_in=False, grouped_out=False,
     ):
         with torch.device(x.device):
+            O = torch.empty((sorted_expert_idxs.size(0), W.size(-1)), device=X.device, dtype=X.dtype)
             output = kernels.ops.scatter2scatter(
                 X=x, W=expert_weights,
+                out=O,
                 sorted_expert_idxs=sorted_expert_idxs,
                 sorted_scattered_idxs=sorted_scattered_idxs,
                 padded_block_idxs=padded_block_idxs,
