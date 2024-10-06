@@ -4,16 +4,25 @@ import triton.language as tl
 from torch.nn import functional as F
 
 BLOCK_M = 128
+ALLOW_TF32 = False
 
-@torch.jit.script
+@torch.library.custom_op("scattermoe::bincount", mutates_args={})
+def compileable_bincount(x: torch.Tensor, minlength: int) -> torch.Tensor:
+        return x.bincount(minlength=minlength)
+
+@compileable_bincount.register_fake
+def _(x: torch.Tensor, minlength: int) -> torch.Tensor:
+    return torch.empty(minlength, dtype=torch.long, device=x.device)
+
+@torch.compile
 def flatten_and_sort(expert_idxs:torch.Tensor):
     flattened_expert_idxs = expert_idxs.flatten()
     sorted_expert_idxs, sorted_scattered_idxs = torch.sort(flattened_expert_idxs)
     return sorted_expert_idxs, sorted_scattered_idxs
 
-@torch.jit.script
+@torch.compile
 def padded_block_indices(sorted_experts_idxs: torch.Tensor, k: int, N_BLOCK_SIZE: int=BLOCK_M) :
-    expert_counts = torch.bincount(sorted_experts_idxs, minlength=k)
+    expert_counts = compileable_bincount(sorted_experts_idxs, minlength=k)
     padded_block_counts = ((expert_counts - 1) // N_BLOCK_SIZE) + 1
     padded_expert_block_end = padded_block_counts.cumsum(-1)
     expert_boundaries_end = expert_counts.cumsum(-1)
@@ -128,34 +137,49 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
         assert out.size(0) == L_scattered and out.size(1) == y_dim
         O = out
 
+    # with torch.cuda.device(X.device):
+    scatter2scatter_compileable(O, W, X, k, padded_block_idxs, sorted_expert_idxs, sorted_scattered_idxs,
+                                x_grouped, y_grouped)
+    return O
+
+
+@torch.library.custom_op("scattermoe::scatter2scatter", mutates_args={"O"})
+def scatter2scatter_compileable(
+        O: torch.Tensor,
+        W: torch.Tensor,
+        X: torch.Tensor,
+        k: int,
+        padded_block_idxs: torch.Tensor,
+        sorted_expert_idxs: torch.Tensor,
+        sorted_scattered_idxs: torch.Tensor,
+        x_grouped: bool, y_grouped: bool) -> None:
     def grid(META):
         grid_num = (
             padded_block_idxs.size(0) *
             triton.cdiv(META['N'], META['BLOCK_N']),
         )
         return grid_num
-    with torch.cuda.device(X.device):
-        _scatter2scatter[grid](
-            # X_ptr, stride_xm, stride_xk,
-            X, X.stride(0), X.stride(1),
-            # W_ptr, stride_we, stride_wk, stride_wn,
-            W, W.stride(0), W.stride(1), W.stride(2),
-            # Y_ptr, stride_ym, stride_yn,
-            O, O.stride(0), O.stride(1),
-            grouped_idx_ptr=sorted_scattered_idxs,
-            expert_idxs_ptr=sorted_expert_idxs,
-            block_start_idx_ptr=padded_block_idxs,
-            FAN_OUT=k,
-            M=X.size(0),
-            K=X.size(1),
-            N=O.size(1), E=W.size(0),
-            BLOCK_M=BLOCK_M,
-            ACC_TYPE=tl.float32,
-            OUT_M=O.size(0),
-            allow_tf32=True,
-            x_grouped=x_grouped, y_grouped=y_grouped,
-        )
-        return O
+
+    _scatter2scatter[grid](
+        # X_ptr, stride_xm, stride_xk,
+        X, X.stride(0), X.stride(1),
+        # W_ptr, stride_we, stride_wk, stride_wn,
+        W, W.stride(0), W.stride(1), W.stride(2),
+        # Y_ptr, stride_ym, stride_yn,
+        O, O.stride(0), O.stride(1),
+        grouped_idx_ptr=sorted_scattered_idxs,
+        expert_idxs_ptr=sorted_expert_idxs,
+        block_start_idx_ptr=padded_block_idxs,
+        FAN_OUT=k,
+        M=X.size(0),
+        K=X.size(1),
+        N=O.size(1), E=W.size(0),
+        BLOCK_M=BLOCK_M,
+        ACC_TYPE=tl.float32,
+        OUT_M=O.size(0),
+        allow_tf32=ALLOW_TF32,
+        x_grouped=x_grouped, y_grouped=y_grouped,
+    )
 
 
 def _config_XtY():
@@ -166,30 +190,40 @@ def _config_XtY():
 def group_bwd_W(DY, X, expert_offsets, E):
     DWt = torch.zeros((E, DY.size(-1), X.size(-1)), device=DY.device, dtype=DY.dtype)
     DW = DWt.permute(0, 2, 1)
+    groupXtY_compileable(E, DW, DY, X, expert_offsets)
+    return DW
+
+
+@torch.library.custom_op("scattermoe::groupXtY", mutates_args={"DW"})
+def groupXtY_compileable(
+        E: int,
+        DW: torch.Tensor,
+        DY: torch.Tensor,
+        X: torch.Tensor,
+        expert_offsets: torch.Tensor) -> None:
     def grid(META):
         grid = (
             E * triton.cdiv(META['K'], META['BLOCK_K']),
             triton.cdiv(META['N'], META['BLOCK_N']),
         )
         return grid
-    
-    with torch.cuda.device(DY.device):
-        _groupXtY[grid](
-            # DY_ptr, stride_dym, stride_dyk,
-            DY, DY.stride(0), DY.stride(1),
-            # X_ptr, stride_xm, stride_xn,
-            X, X.stride(0), X.stride(1),
-            # DW_ptr, stride_dwe, stride_dwk, stride_dwn,
-            DW, DW.stride(0), DW.stride(1), DW.stride(2),
-            # expert_offsets_ptr,
-            expert_offsets,
-            # K: tl.constexpr, N: tl.constexpr,
-            M=DY.size(0), N=DY.size(-1), K=X.size(-1),
-            # ACC_TYPE: tl.constexpr,
-            ACC_TYPE=tl.float32,
-            allow_tf32=True
-        )
-        return DW
+
+    _groupXtY[grid](
+        # DY_ptr, stride_dym, stride_dyk,
+        DY, DY.stride(0), DY.stride(1),
+        # X_ptr, stride_xm, stride_xn,
+        X, X.stride(0), X.stride(1),
+        # DW_ptr, stride_dwe, stride_dwk, stride_dwn,
+        DW, DW.stride(0), DW.stride(1), DW.stride(2),
+        # expert_offsets_ptr,
+        expert_offsets,
+        # K: tl.constexpr, N: tl.constexpr,
+        M=DY.size(0), N=DY.size(-1), K=X.size(-1),
+        # ACC_TYPE: tl.constexpr,
+        ACC_TYPE=tl.float32,
+        allow_tf32=True
+    )
+
 
 @triton.autotune(configs=_config_XtY(), key=['M', 'N', 'K'], )
 @triton.heuristics({
@@ -212,7 +246,8 @@ def _groupXtY(
     pid1 = tl.program_id(axis=1)
     num0 = tl.num_programs(0)
     num1 = tl.num_programs(1)
-    pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
+    # pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
+    pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
 
     K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
     E_idx = pid0 // K_BLOCK_COUNT
@@ -279,22 +314,33 @@ def group(A, sorted_expert_idxs, coeff=None, fan_out=1, out=None):
         Y = out
     else:
         Y = torch.empty((N, K), dtype=A.dtype, device=A.device)
-        # print("grp init:", Y.size())
+    group_compileable(A, K, N, Y, coeff, coeff is not None, fan_out, sorted_expert_idxs)
+    return Y
+
+
+@torch.library.custom_op("scattermoe::group", mutates_args={"Y"})
+def group_compileable(
+        A: torch.Tensor,
+        K: int,
+        N: int,
+        Y: torch.Tensor,
+        coeff: torch.Tensor, has_coeff: bool,
+        fan_out: int,
+        sorted_expert_idxs: torch.Tensor) -> None:
     def grid(META):
         grid_num = (triton.cdiv(META['N'], META['BLOCK_N']),)
         return grid_num
-    with torch.cuda.device(A.device):
-        _group[grid](
-            # A_ptr, stride_an, stride_ai,
-            A, A.stride(0), A.stride(1), coeff is not None, coeff, fan_out,
-            # Y_ptr, stride_yn, stride_yk,
-            Y, Y.stride(0), Y.stride(1),
-            # grouped_idx_ptr,
-            sorted_expert_idxs,
-            # N: tl.constexpr, K: tl.constexpr,
-            N, K
-        )
-        return Y
+    _group[grid](
+        # A_ptr, stride_an, stride_ai,
+        A, A.stride(0), A.stride(1), has_coeff, coeff, fan_out,
+        # Y_ptr, stride_yn, stride_yk,
+        Y, Y.stride(0), Y.stride(1),
+        # grouped_idx_ptr,
+        sorted_expert_idxs,
+        # N: tl.constexpr, K: tl.constexpr,
+        N, K
+    )
+
 
 @triton.autotune(configs=_config_grouping(), key=['K'])
 @triton.heuristics({
