@@ -6,7 +6,7 @@ def read(fname):
 
 setup(
     name = "scattermoe",
-    version = "0.0.0",
+    version = "0.2.0",
     author = "Shawn Tan",
     author_email = "shawn@wtf.sg",
     description = "Triton-based implementation of Sparse Mixture of Experts.",
