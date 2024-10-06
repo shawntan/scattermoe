@@ -306,7 +306,14 @@ def group(A, sorted_expert_idxs, coeff=None, fan_out=1, out=None):
 
 
 @torch.library.custom_op("scattermoe::group", mutates_args={"Y"})
-def group_compileable(A, K, N, Y, coeff, fan_out, sorted_expert_idxs):
+def group_compileable(
+        A: torch.Tensor,
+        K: torch.Tensor,
+        N: int,
+        Y: torch.Tensor,
+        coeff: torch.Tensor,
+        fan_out: int,
+        sorted_expert_idxs: torch.Tensor):
     def grid(META):
         grid_num = (triton.cdiv(META['N'], META['BLOCK_N']),)
         return grid_num
