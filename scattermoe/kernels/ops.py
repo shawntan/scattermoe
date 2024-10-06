@@ -120,7 +120,6 @@ def _scatter2scatter(
     Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
     tl.store(Y_blk_ptrs, acc, mask=E_mask[:, None] & N_mask[None, :])
 
-@torch.library.custom_op("scattermoe::scatter2scatter", mutates_args={"out"})
 def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
                     padded_block_idxs, x_grouped=False, y_grouped=False,
                     out=None):
@@ -143,27 +142,34 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
         )
         return grid_num
     with torch.cuda.device(X.device):
-        _scatter2scatter[grid](
-            # X_ptr, stride_xm, stride_xk,
-            X, X.stride(0), X.stride(1),
-            # W_ptr, stride_we, stride_wk, stride_wn,
-            W, W.stride(0), W.stride(1), W.stride(2),
-            # Y_ptr, stride_ym, stride_yn,
-            O, O.stride(0), O.stride(1),
-            grouped_idx_ptr=sorted_scattered_idxs,
-            expert_idxs_ptr=sorted_expert_idxs,
-            block_start_idx_ptr=padded_block_idxs,
-            FAN_OUT=k,
-            M=X.size(0),
-            K=X.size(1),
-            N=O.size(1), E=W.size(0),
-            BLOCK_M=BLOCK_M,
-            ACC_TYPE=tl.float32,
-            OUT_M=O.size(0),
-            allow_tf32=True,
-            x_grouped=x_grouped, y_grouped=y_grouped,
-        )
+        scatter2scatter_compileable(O, W, X, grid, k, padded_block_idxs, sorted_expert_idxs, sorted_scattered_idxs,
+                                    x_grouped, y_grouped)
         return O
+
+
+@torch.library.custom_op("scattermoe::scatter2scatter", mutates_args={"O"})
+def scatter2scatter_compileable(O, W, X, grid, k, padded_block_idxs, sorted_expert_idxs, sorted_scattered_idxs,
+                                x_grouped, y_grouped):
+    _scatter2scatter[grid](
+        # X_ptr, stride_xm, stride_xk,
+        X, X.stride(0), X.stride(1),
+        # W_ptr, stride_we, stride_wk, stride_wn,
+        W, W.stride(0), W.stride(1), W.stride(2),
+        # Y_ptr, stride_ym, stride_yn,
+        O, O.stride(0), O.stride(1),
+        grouped_idx_ptr=sorted_scattered_idxs,
+        expert_idxs_ptr=sorted_expert_idxs,
+        block_start_idx_ptr=padded_block_idxs,
+        FAN_OUT=k,
+        M=X.size(0),
+        K=X.size(1),
+        N=O.size(1), E=W.size(0),
+        BLOCK_M=BLOCK_M,
+        ACC_TYPE=tl.float32,
+        OUT_M=O.size(0),
+        allow_tf32=True,
+        x_grouped=x_grouped, y_grouped=y_grouped,
+    )
 
 
 def _config_XtY():
