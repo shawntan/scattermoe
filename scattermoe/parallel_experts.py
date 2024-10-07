@@ -26,6 +26,7 @@ class ParallelLinear(torch.autograd.Function):
             else:
                 output_expanded = output.view(gates.size(0), gates.size(1), output.size(-1))
                 output = torch.bmm(gates.unsqueeze(1), output_expanded).squeeze(1)
+
         ctx.save_for_backward(
             x, expert_weights,
             sorted_expert_idxs,
@@ -54,17 +55,16 @@ class ParallelLinear(torch.autograd.Function):
                 d_gates = None
                 gates_flat = None
                 gate_fan = 1
-                grouped_grad_out = None
             else:
                 # calculate gates gradient
                 d_gates = torch.bmm(output_expanded, grad_out.unsqueeze(2)).squeeze(-1)
                 gates_flat = gates.flatten()
                 gate_fan = gates.size(1)
-                grouped_grad_out = output_expanded.flatten(0, 1) # reuse expanded buffer later
 
             if grouped_out:
                 grouped_grad_out = grad_out
             else:
+                grouped_grad_out = output_expanded.flatten(0, 1) # reuse expanded buffer later
                 kernels.ops.group(
                     A=grad_out,
                     sorted_expert_idxs=sorted_expert_idxs,
