@@ -2,8 +2,8 @@ import torch
 import triton
 import triton.language as tl
 
-from torch.library import custom_op as torch_custom_op
 from ..kernels import group_triton_kernel, groupXtY_triton_kernel, scatter2scatter_triton_kernel
+from ..utils import torch_custom_op
 
 
 LIBRARY_NAME = "scattermoe"
