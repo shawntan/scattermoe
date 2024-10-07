@@ -2,7 +2,6 @@ import triton
 import triton.language as tl
 
 
-BLOCK_M = 128
 
 
 @triton.autotune(

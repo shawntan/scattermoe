@@ -1,6 +1,7 @@
 from . import compileable_ops as ops
 from . import single
 
+BLOCK_M = 128
 def padded_block_indices(sorted_experts_idxs: torch.Tensor, k: int, N_BLOCK_SIZE: int = BLOCK_M):
     # there is an overhead of launching a custom op so we only use the custom op when compiling
     if torch.compiler.is_compiling():
