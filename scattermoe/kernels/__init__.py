@@ -1,3 +1,4 @@
+import torch
 from . import compileable_ops as ops
 from . import single
 
