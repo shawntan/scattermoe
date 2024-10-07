@@ -4,7 +4,7 @@ from torch.nn import functional as F
 
 # from . import kernels
 # from .parallel_experts import ParallelExperts
-from .triton_implementation import ParallelExperts
+from .triton_implementation import ParallelExperts, padded_block_indices
 
 class GLUMLP(nn.Module):
     def __init__(
@@ -33,7 +33,7 @@ class GLUMLP(nn.Module):
         x = x.view(-1, x_shape[-1])
         with torch.no_grad():
             sorted_expert_idxs, sorted_scattered_idxs = torch.sort(expert_idxs.flatten())
-            padded_block_idxs, expert_offsets = kernels.padded_block_indices(sorted_expert_idxs, self.num_experts)
+            padded_block_idxs, expert_offsets = padded_block_indices(sorted_expert_idxs, self.num_experts)
 
         h, gates  = self.experts(
             x, self.top_k,
