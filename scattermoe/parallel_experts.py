@@ -54,17 +54,17 @@ class ParallelLinear(torch.autograd.Function):
         grouped_out = ctx.grouped_out
         # print("backward")
         with torch.device(grad_out.device):
-            if gates is not None:
-                # calculate gates gradient
-                d_gates = torch.bmm(output_expanded, grad_out[:, :, None]).squeeze(-1)
-                gates_flat = gates.flatten()
-                gate_fan = gates.size(1)
-                grouped_grad_out = output_expanded.flatten(0, 1) # reuse expanded buffer later
-            else:
+            if gates is None:
                 d_gates = None
                 gates_flat = None
                 gate_fan = 1
                 grouped_grad_out = None
+            else:
+                # calculate gates gradient
+                d_gates = torch.bmm(output_expanded, grad_out.unsqueeze(2)).squeeze(-1)
+                gates_flat = gates.flatten()
+                gate_fan = gates.size(1)
+                grouped_grad_out = output_expanded.flatten(0, 1) # reuse expanded buffer later
 
             if grouped_out:
                 grouped_grad_out = grad_out
@@ -79,12 +79,16 @@ class ParallelLinear(torch.autograd.Function):
             if grouped_in:
                 grouped_x = x
                 d_expanded_input = torch.empty(
-                    (grouped_grad_out.size(0), expert_weights.size(1)),
-                    device=grouped_grad_out.device, dtype=grouped_grad_out.dtype)
+                    (sorted_expert_idxs.size(0), expert_weights.size(1)),
+                    device=x.device, dtype=x.dtype)
             else:
-                grouped_x = torch.empty(sorted_scattered_idxs.size(0), x.size(1), dtype=x.dtype, device=x.device)
+                grouped_x = torch.empty(
+                    (sorted_scattered_idxs.size(0), x.size(1)),
+                    dtype=x.dtype, device=x.device
+                )
                 kernels.ops.group(
-                    x, sorted_scattered_idxs,
+                    A=x,
+                    sorted_expert_idxs=sorted_scattered_idxs,
                     out=grouped_x,
                     fan_out=k
                 )
