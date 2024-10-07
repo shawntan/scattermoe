@@ -15,21 +15,17 @@ class ParallelLinear(torch.autograd.Function):
                                  device=x.device, dtype=x.dtype)
             kernels.ops.scatter2scatter(
                 X=x, W=expert_weights,
-                out=output,
                 sorted_expert_idxs=sorted_expert_idxs,
                 sorted_scattered_idxs=sorted_scattered_idxs,
                 padded_block_idxs=padded_block_idxs,
+                out=output,
                 FAN_OUT=k, x_grouped=grouped_in, y_grouped=grouped_out
             )
-            if gates is not None:
-                output_expanded = output.view(gates.size(0), gates.size(1), output.size(-1))
-                output = torch.bmm(
-                    gates[:, None, :],
-                    output_expanded
-                ).squeeze(1)
-            else:
+            if gates is None:
                 output_expanded = None
-
+            else:
+                output_expanded = output.view(gates.size(0), gates.size(1), output.size(-1))
+                output = torch.bmm(gates.unsqueeze(1), output_expanded).squeeze(1)
         ctx.save_for_backward(
             x, expert_weights,
             sorted_expert_idxs,
@@ -53,7 +49,7 @@ class ParallelLinear(torch.autograd.Function):
         grouped_in = ctx.grouped_in
         grouped_out = ctx.grouped_out
         # print("backward")
-        with torch.device(grad_out.device):
+        with torch.device(x.device):
             if gates is None:
                 d_gates = None
                 gates_flat = None
