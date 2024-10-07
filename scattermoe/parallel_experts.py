@@ -11,14 +11,15 @@ class ParallelLinear(torch.autograd.Function):
         gates=None, grouped_in=False, grouped_out=False,
     ):
         with torch.device(x.device):
-            output = torch.empty((sorted_expert_idxs.size(0), W.size(-1)), device=X.device, dtype=X.dtype)
+            output = torch.empty((sorted_expert_idxs.size(0), expert_weights.size(-1)),
+                                 device=x.device, dtype=x.dtype)
             kernels.ops.scatter2scatter(
                 X=x, W=expert_weights,
-                out=O,
+                out=output,
                 sorted_expert_idxs=sorted_expert_idxs,
                 sorted_scattered_idxs=sorted_scattered_idxs,
                 padded_block_idxs=padded_block_idxs,
-                k=k, x_grouped=grouped_in, y_grouped=grouped_out
+                FAN_OUT=k, x_grouped=grouped_in, y_grouped=grouped_out
             )
             if gates is not None:
                 output_expanded = output.view(gates.size(0), gates.size(1), output.size(-1))
@@ -77,9 +78,16 @@ class ParallelLinear(torch.autograd.Function):
                 )
             if grouped_in:
                 grouped_x = x
-                d_expanded_input = None
+                d_expanded_input = torch.empty(
+                    (grouped_grad_out.size(0), expert_weights.size(1)),
+                    device=grouped_grad_out.device, dtype=grouped_grad_out.dtype)
             else:
-                grouped_x = kernels.ops.group(x, sorted_scattered_idxs, fan_out=k)
+                grouped_x = torch.empty(sorted_scattered_idxs.size(0), x.size(1), dtype=x.dtype, device=x.device)
+                kernels.ops.group(
+                    x, sorted_scattered_idxs,
+                    out=grouped_x,
+                    fan_out=k
+                )
                 d_expanded_input = grouped_x
 
             d_weights = torch.zeros(
@@ -90,7 +98,7 @@ class ParallelLinear(torch.autograd.Function):
                 dtype=grouped_grad_out.dtype,
             ).permute(0, 2, 1)
 
-            kernels.ops.grouped_bwd_W(
+            kernels.ops.group_bwd_W(
                 DY=grouped_grad_out,
                 X=grouped_x,
                 expert_offsets=expert_offsets,
