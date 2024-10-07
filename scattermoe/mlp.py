@@ -31,8 +31,8 @@ class GLUMLP(nn.Module):
         x_shape = x.size()
         x = x.view(-1, x_shape[-1])
         with torch.no_grad():
-            sorted_expert_idxs, sorted_scattered_idxs = kernels.ops.flatten_and_sort(expert_idxs)
-            padded_block_idxs, expert_offsets = kernels.ops.padded_block_indices(sorted_expert_idxs, self.num_experts)
+            sorted_expert_idxs, sorted_scattered_idxs = torch.sort(expert_idxs.flatten())
+            padded_block_idxs, expert_offsets = kernels.padded_block_indices(sorted_expert_idxs, self.num_experts)
 
         h, gates  = self.experts(
             x, self.top_k,

@@ -11,8 +11,8 @@ class ParallelLinear(torch.autograd.Function):
         gates=None, grouped_in=False, grouped_out=False,
     ):
         with torch.device(x.device):
-            O = torch.empty((sorted_expert_idxs.size(0), W.size(-1)), device=X.device, dtype=X.dtype)
-            output = kernels.ops.scatter2scatter(
+            output = torch.empty((sorted_expert_idxs.size(0), W.size(-1)), device=X.device, dtype=X.dtype)
+            kernels.ops.scatter2scatter(
                 X=x, W=expert_weights,
                 out=O,
                 sorted_expert_idxs=sorted_expert_idxs,
@@ -58,7 +58,6 @@ class ParallelLinear(torch.autograd.Function):
                 d_gates = torch.bmm(output_expanded, grad_out[:, :, None]).squeeze(-1)
                 gates_flat = gates.flatten()
                 gate_fan = gates.size(1)
-                # print("expanded and grouping")
                 grouped_grad_out = output_expanded.flatten(0, 1) # reuse expanded buffer later
             else:
                 d_gates = None
@@ -69,29 +68,46 @@ class ParallelLinear(torch.autograd.Function):
             if grouped_out:
                 grouped_grad_out = grad_out
             else:
-                grouped_grad_out = kernels.ops.group(grad_out, sorted_scattered_idxs,
-                                                     fan_out=gate_fan, coeff=gates_flat,
-                                                     out=grouped_grad_out)
+                kernels.ops.group(
+                    A=grad_out,
+                    sorted_expert_idxs=sorted_expert_idxs,
+                    out=grouped_grad_out,
+                    coeff=gates_flat,
+                    fan_out=gate_fan,
+                )
             if grouped_in:
                 grouped_x = x
                 d_expanded_input = None
             else:
                 grouped_x = kernels.ops.group(x, sorted_scattered_idxs, fan_out=k)
                 d_expanded_input = grouped_x
-            d_weights = kernels.ops.group_bwd_W(
-                DY=grouped_grad_out, X=grouped_x,
+
+            d_weights = torch.zeros(
+                expert_weights.size(0),
+                grouped_grad_out.size(-1),
+                grouped_x.size(-1),
+                device=grouped_grad_out.device,
+                dtype=grouped_grad_out.dtype,
+            ).permute(0, 2, 1)
+
+            kernels.ops.grouped_bwd_W(
+                DY=grouped_grad_out,
+                X=grouped_x,
                 expert_offsets=expert_offsets,
+                DW=d_weights,
                 E=expert_weights.size(0)
             )
-            d_expanded_input = kernels.ops.scatter2scatter(
-                X=grouped_grad_out, x_grouped=True,
+
+            kernels.ops.scatter2scatter(
+                X=grouped_grad_out,
                 W=expert_weights.permute(0, 2, 1),
-                padded_block_idxs=padded_block_idxs,
                 sorted_expert_idxs=sorted_expert_idxs,
                 sorted_scattered_idxs=sorted_scattered_idxs,
-                k=1,
+                padded_block_idxs=padded_block_idxs,
+                out=d_expanded_input,  # Reuse grouped_x buffer
+                FAN_OUT=1,
+                x_grouped=True,
                 y_grouped=grouped_in,
-                out=d_expanded_input # Reuse grouped_x buffer
             )
 
             if k == 1:
