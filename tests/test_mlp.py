@@ -59,8 +59,13 @@ class TestClass:
         err_dW2 = torch.abs(dW2_ - dW2)
         tolerance = 1e-2
         print("Y error:", err_Y.max())
+        print("dg:", err_dg.max())
+        print("dW1:", err_dW1.max())
+        print("dW2:", err_dW2.max())
+        print("dX:", err_dX.max())
         assert err_Y.max() < tolerance, "Y error too large: max %0.05f" % err_Y.max()
-        assert err_dX.max() < tolerance, "dX error too large: max %0.05f" % err_dX.max()
         assert err_dg.max() < tolerance, "dg error too large: max %0.05f" % err_dg.max()
         assert err_dW1.max() < tolerance, "dW1 error too large: max %0.05f" % err_dW1.max()
         assert err_dW2.max() < tolerance, "dW2 error too large: max %0.05f" % err_dW2.max()
+        assert err_dX.max() < tolerance, "dX error too large: max %0.05f" % err_dX.max()
+
