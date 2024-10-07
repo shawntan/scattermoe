@@ -2,8 +2,6 @@ import triton
 import triton.language as tl
 
 
-
-
 @triton.autotune(
     configs=[triton.Config({"BLOCK_N": 128, "BLOCK_K": 32}, num_stages=4, num_warps=4)],
     key=["N", "K"],
