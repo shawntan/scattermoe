@@ -2,11 +2,11 @@ import torch
 import triton
 import triton.language as tl
 
-from .....constants import LIBRARY_NAME
-from ....utils import torch_custom_op
+from torch.library import custom_op as torch_custom_op
 from ..kernels import group_triton_kernel, groupXtY_triton_kernel, scatter2scatter_triton_kernel
 
 
+LIBRARY_NAME = "scattermoe"
 BLOCK_M = 128
 torch._dynamo.config.capture_scalar_outputs = True
 
