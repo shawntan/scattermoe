@@ -2,8 +2,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from . import kernels
-from .parallel_experts import ParallelExperts
+# from . import kernels
+# from .parallel_experts import ParallelExperts
+from triton_implementation import ParallelExperts
 
 class GLUMLP(nn.Module):
     def __init__(
