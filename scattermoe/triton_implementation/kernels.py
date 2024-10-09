@@ -56,7 +56,7 @@ def scatter2scatter_triton_kernel(
 
     for E_idx in range(E_first_idx, E_last_idx + 1):
         E_mask = E_idxs == E_idx
-        E_M_idx = tl.where(E_mask, M_idx, 0)
+        E_M_idx = tl.where(E_mask, M_idx, 0).to(tl.int32)
         if x_grouped:
             M_in_idx = M_block
         else:
