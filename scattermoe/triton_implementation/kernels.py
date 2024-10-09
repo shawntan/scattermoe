@@ -48,41 +48,9 @@ def scatter2scatter_triton_kernel(
     no_k_mask = K % BLOCK_K == 0
     no_n_mask = N % BLOCK_N == 0
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_TYPE)
+
     E_idx = tl.min(E_idxs)
     E_mask = E_idxs == E_idx
-
-    M_out_idx, acc = compute_expert_block(
-        E_idx, E_mask,
-        M_block,
-        N_block, N_mask,
-        X_ptr, stride_xm, stride_xk,
-        W_ptr, stride_we, stride_wk, stride_wn,
-        grouped_idx_ptr,
-        FAN_OUT, K,
-        acc,
-        allow_tf32,
-        no_k_mask, no_n_mask,
-        x_grouped, y_grouped, ACC_TYPE, BLOCK_K
-    )
-
-    Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
-    mask = E_mask[:, None] & N_mask[None, :]
-    tl.store(Y_blk_ptrs, acc, mask=mask)
-
-@triton.jit
-def compute_expert_block(
-        E_idx, E_mask,
-        M_block,
-        N_block, N_mask,
-        X_ptr, stride_xm, stride_xk,
-        W_ptr, stride_we, stride_wk, stride_wn,
-        grouped_idx_ptr,
-        FAN_OUT, K,
-        acc,
-        allow_tf32,
-        no_k_mask, no_n_mask,
-        x_grouped, y_grouped,
-        ACC_TYPE, BLOCK_K):
     M_idx = tl.load(grouped_idx_ptr + M_block, mask=E_mask, other=0)
     if x_grouped:
         M_in_idx = M_block
@@ -92,6 +60,36 @@ def compute_expert_block(
         M_out_idx = M_block
     else:
         M_out_idx = M_idx
+
+    acc = compute_expert_block(
+        E_idx, E_mask,
+        M_in_idx,
+        N_block, N_mask,
+        X_ptr, stride_xm, stride_xk,
+        W_ptr, stride_we, stride_wk, stride_wn,
+        K,
+        acc,
+        allow_tf32,
+        no_k_mask, no_n_mask,
+        ACC_TYPE, BLOCK_K
+    )
+
+    Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
+    tl.store(Y_blk_ptrs, acc, mask=E_mask[:, None] & N_mask[None, :])
+
+@triton.jit
+def compute_expert_block(
+        E_idx, E_mask,
+        M_in_idx,
+        N_block, N_mask,
+        X_ptr, stride_xm, stride_xk,
+        W_ptr, stride_we, stride_wk, stride_wn,
+        K,
+        acc,
+        allow_tf32,
+        no_k_mask, no_n_mask,
+        ACC_TYPE, BLOCK_K):
+
     K_block = tl.arange(0, BLOCK_K)
 
     X_blk_ptrs = X_ptr + M_in_idx[:, None] * stride_xm + K_block[None, :] * stride_xk
@@ -114,7 +112,7 @@ def compute_expert_block(
         W_blk_ptrs += BLOCK_K * stride_wk
         acc += tl.dot(x, w, allow_tf32=allow_tf32, out_dtype=ACC_TYPE)
 
-    return M_out_idx, acc
+    return acc
 
 
 @triton.autotune(
