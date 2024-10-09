@@ -54,9 +54,10 @@ def scatter2scatter_triton_kernel(
     E_last_idx = tl.minimum(tl.max(E_idxs), E - 1)
     M_idx = tl.load(grouped_idx_ptr + M_block, mask=M_boundary_mask, other=0).to(tl.int32)
 
-    iters = E_last_idx - E_first_idx + 1
-    for i in range(iters):
-        E_idx = i + E_first_idx
+    # iters = E_last_idx - E_first_idx + 1
+    # for i in range(iters):
+    #     E_idx = i + E_first_idx
+    for E_idx in range(E_first_idx, E_last_idx + 1):
         E_mask = E_idxs == E_idx
         E_M_idx = tl.where(E_mask, M_idx, 0)
         if x_grouped:
