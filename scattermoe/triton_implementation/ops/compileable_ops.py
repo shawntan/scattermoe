@@ -38,25 +38,20 @@ def _scatter2scatter(
     assert out.size(0) == sorted_expert_idxs.size(0)
     assert out.size(1) == W.size(-1)
 
-    grid = lambda meta: (padded_block_idxs.size(0) * triton.cdiv(meta["N"], meta["BLOCK_N"]),)
+    grid = lambda meta: (
+        sorted_expert_idxs.size(0) *
+        triton.cdiv(meta["N"], meta["BLOCK_N"]),)
 
     scatter2scatter_triton_kernel[grid](
         # X_ptr, stride_xm, stride_xk,
-        X,
-        X.stride(0),
-        X.stride(1),
+        X, X.stride(0), X.stride(1),
         # W_ptr, stride_we, stride_wk, stride_wn,
-        W,
-        W.stride(0),
-        W.stride(1),
-        W.stride(2),
+        W, W.stride(0), W.stride(1), W.stride(2),
         # Y_ptr, stride_ym, stride_yn,
-        out,
-        out.stride(0),
-        out.stride(1),
+        out, out.stride(0), out.stride(1),
         grouped_idx_ptr=sorted_scattered_idxs,
         expert_idxs_ptr=sorted_expert_idxs,
-        block_start_idx_ptr=padded_block_idxs,
+        # block_start_idx_ptr=padded_block_idxs,
         FAN_OUT=FAN_OUT,
         M=X.size(0),
         K=X.size(1),
