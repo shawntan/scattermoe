@@ -53,37 +53,17 @@ def scatter2scatter_triton_kernel(
     E_first_idx = tl.min(E_idxs)
     E_last_idx = tl.minimum(tl.max(E_idxs), E - 1)
     M_idx = tl.load(grouped_idx_ptr + M_block, mask=M_boundary_mask, other=0).to(tl.int32)
-    iters = E_last_idx - E_first_idx + 1
-    if iters > 1:
-        for i in range(iters):
-            E_idx = i + E_first_idx
-            E_mask = E_idxs == E_idx
-            E_M_idx = tl.where(E_mask, M_idx, 0)
-            if x_grouped:
-                M_in_idx = M_block
-            else:
-                M_in_idx = E_M_idx // FAN_OUT
 
-            acc = compute_expert_block(
-                E_idx, E_mask,
-                M_in_idx,
-                N_block, N_mask,
-                X_ptr, stride_xm, stride_xk,
-                W_ptr, stride_we, stride_wk, stride_wn,
-                K,
-                acc,
-                allow_tf32,
-                no_k_mask, no_n_mask,
-                ACC_TYPE, BLOCK_K
-            )
-    else:
-        E_idx = E_first_idx
+    iters = E_last_idx - E_first_idx + 1
+    for i in range(iters):
+        E_idx = i + E_first_idx
         E_mask = E_idxs == E_idx
         E_M_idx = tl.where(E_mask, M_idx, 0)
         if x_grouped:
             M_in_idx = M_block
         else:
             M_in_idx = E_M_idx // FAN_OUT
+
         acc = compute_expert_block(
             E_idx, E_mask,
             M_in_idx,
@@ -96,7 +76,6 @@ def scatter2scatter_triton_kernel(
             no_k_mask, no_n_mask,
             ACC_TYPE, BLOCK_K
         )
-
     if y_grouped:
         M_out_idx = M_block
     else:
