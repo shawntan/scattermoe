@@ -33,17 +33,21 @@ class GLUMLP(nn.Module):
         with torch.no_grad():
             sorted_expert_idxs, sorted_scattered_idxs = torch.sort(expert_idxs.flatten())
             padded_block_idxs, expert_offsets = padded_block_indices(sorted_expert_idxs, self.num_experts)
-
         h, gates  = self.experts(
-            x, self.top_k,
-            sorted_expert_idxs, sorted_scattered_idxs,
-            expert_offsets,
+            inputs=x,
+            k=self.top_k,
+            sorted_expert_idxs=sorted_expert_idxs,
+            sorted_scattered_idxs=sorted_scattered_idxs,
+            expert_offsets=expert_offsets,
             grouped_out=True
         ).chunk(2, dim=-1)
         h = self.activation(gates) * h
         y = self.output_experts(
-            h, 1, sorted_expert_idxs, sorted_scattered_idxs,
-            expert_offsets,
+            inputs=h,
+            k=1,
+            sorted_expert_idxs=sorted_expert_idxs,
+            sorted_scattered_idxs=sorted_scattered_idxs,
+            expert_offsets=expert_offsets,
             grouped_in=True,
             gates=expert_p,
         )
