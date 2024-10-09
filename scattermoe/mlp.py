@@ -87,14 +87,15 @@ class MLP(nn.Module):
         h = self.experts(
             x, self.top_k,
             sorted_expert_idxs, sorted_scattered_idxs,
-            padded_block_idxs, expert_offsets,
-            grouped_out=True
+            expert_offsets,
+            grouped_out=True, grouped_in=False,
+            gates=None
         )
         h = self.activation(h)
         y = self.output_experts(
             h, 1, sorted_expert_idxs, sorted_scattered_idxs,
-            padded_block_idxs, expert_offsets,
-            grouped_in=True,
+            expert_offsets,
+            grouped_out=False, grouped_in=True,
             gates=expert_p,
         )
         y = y.view(*x_shape[:-1], y.size(-1))

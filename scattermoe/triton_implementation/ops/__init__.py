@@ -182,8 +182,18 @@ def scattered_experts(
     grouped_in=False,
     grouped_out=False,
 ):
+    x = inputs
+    expert_weights = expert_weights
+    k = k
+    sorted_expert_idxs = sorted_expert_idxs
+    sorted_scattered_idxs = sorted_scattered_idxs
+    expert_offsets = expert_offsets
+    gates = gates
+    grouped_in = grouped_in
+    grouped_out = grouped_out
+
     return _ScatteredExperts.apply(
-        inputs,
+        x,
         expert_weights,
         k,
         sorted_expert_idxs,
