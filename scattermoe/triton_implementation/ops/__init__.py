@@ -191,7 +191,6 @@ def scattered_experts(
     k,
     sorted_expert_idxs,
     sorted_scattered_idxs,
-    padded_block_idxs,
     expert_offsets,
     gates=None,
     grouped_in=False,
