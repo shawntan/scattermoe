@@ -49,9 +49,10 @@ def scatter2scatter_triton_kernel(
     no_n_mask = N % BLOCK_N == 0
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_TYPE)
     E_idx = tl.min(E_idxs)
+    E_mask = E_idxs == E_idx
 
-    E_mask, M_out_idx, acc = compute_expert_block(
-        E_idx, E_idxs,
+    M_out_idx, acc = compute_expert_block(
+        E_idx, E_mask,
         M_block,
         N_block, N_mask,
         X_ptr, stride_xm, stride_xk,
@@ -69,7 +70,7 @@ def scatter2scatter_triton_kernel(
 
 @triton.jit
 def compute_expert_block(
-        E_idx, E_idxs,
+        E_idx, E_mask,
         M_block,
         N_block, N_mask,
         X_ptr, stride_xm, stride_xk,
@@ -81,7 +82,6 @@ def compute_expert_block(
         no_k_mask, no_n_mask,
         x_grouped, y_grouped,
         ACC_TYPE, BLOCK_K):
-    E_mask = E_idxs == E_idx
     M_idx = tl.load(grouped_idx_ptr + M_block, mask=E_mask, other=0)
     if x_grouped:
         M_in_idx = M_block
