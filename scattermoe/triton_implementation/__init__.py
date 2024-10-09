@@ -3,7 +3,7 @@ from typing import Callable
 import torch
 import torch.nn as nn
 
-from .ops import padded_block_indices, scattered_experts
+from .ops import expert_boundaries, scattered_experts
 
 
 class ParallelExperts(nn.Module):
