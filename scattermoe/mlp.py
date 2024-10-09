@@ -82,7 +82,7 @@ class MLP(nn.Module):
         x = x.view(-1, x_shape[-1])
         with torch.no_grad():
             sorted_expert_idxs, sorted_scattered_idxs = torch.sort(expert_idxs.flatten())
-            padded_block_idxs, expert_offsets = expert_boundaries(sorted_expert_idxs, self.num_experts)
+            expert_offsets = expert_boundaries(sorted_expert_idxs, self.num_experts)
 
         h = self.experts(
             x, self.top_k,
