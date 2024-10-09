@@ -66,7 +66,8 @@ def scatter2scatter_triton_kernel(
     )
 
     Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
-    tl.store(Y_blk_ptrs, acc, mask=E_mask[:, None] & N_mask[None, :])
+    mask = E_mask[:, None] & N_mask[None, :]
+    tl.store(Y_blk_ptrs, acc, mask=mask)
 
 @triton.jit
 def compute_expert_block(
@@ -113,7 +114,7 @@ def compute_expert_block(
         W_blk_ptrs += BLOCK_K * stride_wk
         acc += tl.dot(x, w, allow_tf32=allow_tf32, out_dtype=ACC_TYPE)
 
-    return E_mask, M_out_idx, acc
+    return M_out_idx, acc
 
 
 @triton.autotune(
