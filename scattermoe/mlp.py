@@ -2,9 +2,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-# from . import kernels
-# from .parallel_experts import ParallelExperts
-from .triton_implementation import ParallelExperts, padded_block_indices
+from .triton_implementation import ParallelExperts, expert_boundaries
 
 class GLUMLP(nn.Module):
     def __init__(
@@ -33,18 +31,22 @@ class GLUMLP(nn.Module):
         x = x.view(-1, x_shape[-1])
         with torch.no_grad():
             sorted_expert_idxs, sorted_scattered_idxs = torch.sort(expert_idxs.flatten())
-            padded_block_idxs, expert_offsets = padded_block_indices(sorted_expert_idxs, self.num_experts)
-
+            expert_offsets = expert_boundaries(sorted_expert_idxs, self.num_experts)
         h, gates  = self.experts(
-            x, self.top_k,
-            sorted_expert_idxs, sorted_scattered_idxs,
-            padded_block_idxs, expert_offsets,
+            inputs=x,
+            k=self.top_k,
+            sorted_expert_idxs=sorted_expert_idxs,
+            sorted_scattered_idxs=sorted_scattered_idxs,
+            expert_offsets=expert_offsets,
             grouped_out=True
         ).chunk(2, dim=-1)
         h = self.activation(gates) * h
         y = self.output_experts(
-            h, 1, sorted_expert_idxs, sorted_scattered_idxs,
-            padded_block_idxs, expert_offsets,
+            inputs=h,
+            k=1,
+            sorted_expert_idxs=sorted_expert_idxs,
+            sorted_scattered_idxs=sorted_scattered_idxs,
+            expert_offsets=expert_offsets,
             grouped_in=True,
             gates=expert_p,
         )
@@ -79,19 +81,20 @@ class MLP(nn.Module):
         x = x.view(-1, x_shape[-1])
         with torch.no_grad():
             sorted_expert_idxs, sorted_scattered_idxs = torch.sort(expert_idxs.flatten())
-            padded_block_idxs, expert_offsets = padded_block_indices(sorted_expert_idxs, self.num_experts)
+            expert_offsets = expert_boundaries(sorted_expert_idxs, self.num_experts)
 
         h = self.experts(
             x, self.top_k,
             sorted_expert_idxs, sorted_scattered_idxs,
-            padded_block_idxs, expert_offsets,
-            grouped_out=True
+            expert_offsets,
+            grouped_out=True, grouped_in=False,
+            gates=None
         )
         h = self.activation(h)
         y = self.output_experts(
             h, 1, sorted_expert_idxs, sorted_scattered_idxs,
-            padded_block_idxs, expert_offsets,
-            grouped_in=True,
+            expert_offsets,
+            grouped_out=False, grouped_in=True,
             gates=expert_p,
         )
         y = y.view(*x_shape[:-1], y.size(-1))

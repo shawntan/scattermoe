@@ -8,6 +8,7 @@ from ..utils import torch_custom_op
 
 LIBRARY_NAME = "scattermoe"
 BLOCK_M = 128
+ALLOW_TF32 = False
 torch._dynamo.config.capture_scalar_outputs = True
 
 
@@ -27,7 +28,6 @@ def _scatter2scatter(
     W: torch.Tensor,
     sorted_expert_idxs: torch.Tensor,
     sorted_scattered_idxs: torch.Tensor,
-    padded_block_idxs: torch.Tensor,
     out: torch.Tensor,
     FAN_OUT: int,
     x_grouped: bool = False,
@@ -38,25 +38,20 @@ def _scatter2scatter(
     assert out.size(0) == sorted_expert_idxs.size(0)
     assert out.size(1) == W.size(-1)
 
-    grid = lambda meta: (padded_block_idxs.size(0) * triton.cdiv(meta["N"], meta["BLOCK_N"]),)
+    grid = lambda meta: (
+        triton.cdiv(sorted_expert_idxs.size(0), meta["BLOCK_M"]) *
+        triton.cdiv(meta["N"], meta["BLOCK_N"]),
+    )
 
     scatter2scatter_triton_kernel[grid](
         # X_ptr, stride_xm, stride_xk,
-        X,
-        X.stride(0),
-        X.stride(1),
+        X, X.stride(0), X.stride(1),
         # W_ptr, stride_we, stride_wk, stride_wn,
-        W,
-        W.stride(0),
-        W.stride(1),
-        W.stride(2),
+        W, W.stride(0), W.stride(1), W.stride(2),
         # Y_ptr, stride_ym, stride_yn,
-        out,
-        out.stride(0),
-        out.stride(1),
+        out, out.stride(0), out.stride(1),
         grouped_idx_ptr=sorted_scattered_idxs,
         expert_idxs_ptr=sorted_expert_idxs,
-        block_start_idx_ptr=padded_block_idxs,
         FAN_OUT=FAN_OUT,
         M=X.size(0),
         K=X.size(1),
@@ -64,7 +59,7 @@ def _scatter2scatter(
         E=W.size(0),
         BLOCK_M=BLOCK_M,
         ACC_TYPE=tl.float32,
-        allow_tf32=torch.backends.cudnn.allow_tf32,
+        allow_tf32=torch.backends.cudnn.allow_tf32 and ALLOW_TF32,
         x_grouped=x_grouped,
         y_grouped=y_grouped,
     )
@@ -77,7 +72,6 @@ def _scatter2scatter_compileable(
     W: torch.Tensor,
     sorted_expert_idxs: torch.Tensor,
     sorted_scattered_idxs: torch.Tensor,
-    padded_block_idxs: torch.Tensor,
     out: torch.Tensor,
     FAN_OUT: int,
     x_grouped: bool = False,
@@ -88,7 +82,6 @@ def _scatter2scatter_compileable(
         W=W,
         sorted_expert_idxs=sorted_expert_idxs,
         sorted_scattered_idxs=sorted_scattered_idxs,
-        padded_block_idxs=padded_block_idxs,
         out=out,
         FAN_OUT=FAN_OUT,
         x_grouped=x_grouped,
@@ -101,19 +94,17 @@ def scatter2scatter(
     W: torch.Tensor,
     sorted_expert_idxs: torch.Tensor,
     sorted_scattered_idxs: torch.Tensor,
-    padded_block_idxs: torch.Tensor,
     out: torch.Tensor,
     FAN_OUT: int,
     x_grouped: bool = False,
     y_grouped: bool = False,
 ) -> None:
-    if torch.compiler.is_compiling():
+    if False: # torch.compiler.is_compiling():
         _scatter2scatter_compileable(
             X=X,
             W=W,
             sorted_expert_idxs=sorted_expert_idxs,
             sorted_scattered_idxs=sorted_scattered_idxs,
-            padded_block_idxs=padded_block_idxs,
             out=out,
             FAN_OUT=FAN_OUT,
             x_grouped=x_grouped,
@@ -125,7 +116,6 @@ def scatter2scatter(
             W=W,
             sorted_expert_idxs=sorted_expert_idxs,
             sorted_scattered_idxs=sorted_scattered_idxs,
-            padded_block_idxs=padded_block_idxs,
             out=out,
             FAN_OUT=FAN_OUT,
             x_grouped=x_grouped,
@@ -157,7 +147,7 @@ def _group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor
         K=X.size(-1),
         # ACC_TYPE: tl.constexpr,
         ACC_TYPE=tl.float32,
-        allow_tf32=torch.backends.cudnn.allow_tf32,
+        allow_tf32=torch.backends.cudnn.allow_tf32 and ALLOW_TF32,
     )
 
 
@@ -170,7 +160,7 @@ def _group_bwd_W_compileable(
 
 
 def group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor, DW: torch.Tensor, E: int) -> None:
-    if torch.compiler.is_compiling():
+    if False: # torch.compiler.is_compiling():
         _group_bwd_W_compileable(DY=DY, X=X, expert_offsets=expert_offsets, DW=DW, E=E)
     else:
         _group_bwd_W(DY=DY, X=X, expert_offsets=expert_offsets, DW=DW, E=E)
@@ -228,7 +218,7 @@ def group(
     coeff: torch.Tensor | None = None,
     fan_out: int = 1,
 ) -> None:
-    if torch.compiler.is_compiling():
+    if False: # torch.compiler.is_compiling():
         _group_compileable(A=A, sorted_expert_idxs=sorted_expert_idxs, out=out, coeff=coeff, fan_out=fan_out)
     else:
         _group(A=A, sorted_expert_idxs=sorted_expert_idxs, out=out, coeff=coeff, fan_out=fan_out)

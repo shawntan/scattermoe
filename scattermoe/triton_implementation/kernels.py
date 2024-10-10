@@ -16,7 +16,7 @@ def scatter2scatter_triton_kernel(
     Y_ptr, stride_ym, stride_yn,
     grouped_idx_ptr,
     expert_idxs_ptr,
-    block_start_idx_ptr,
+    # block_start_idx_ptr,
     FAN_OUT,
     M,
     K: tl.constexpr,
@@ -36,46 +36,55 @@ def scatter2scatter_triton_kernel(
     M_block_id = pid // N_BLOCK_COUNT
     N_block_id = pid % N_BLOCK_COUNT
     M_range = tl.arange(0, BLOCK_M)
-    block_start_idx = tl.load(block_start_idx_ptr + M_block_id)
+    N_range = tl.arange(0, BLOCK_N)
+    # block_start_idx = tl.load(block_start_idx_ptr + M_block_id)
 
-    M_block = tl.max_contiguous(block_start_idx + M_range, BLOCK_M)
-
-    N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    # M_block = tl.max_contiguous(M_block_id * BLOCK_M + M_range, BLOCK_M)
+    M_block = M_block_id * BLOCK_M + M_range
+    N_block = N_block_id * BLOCK_N + N_range
     N_mask = N_block < N
-
-    E_idxs = tl.load(expert_idxs_ptr + M_block, mask=M_block < (FAN_OUT * M), other=E)
+    M_boundary_mask = M_block < (FAN_OUT * M)
+    E_idxs = tl.load(expert_idxs_ptr + M_block, mask=M_boundary_mask, other=E)
 
     no_k_mask = K % BLOCK_K == 0
     no_n_mask = N % BLOCK_N == 0
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_TYPE)
 
-    E_idx = tl.min(E_idxs)
-    E_mask = E_idxs == E_idx
-    M_idx = tl.load(grouped_idx_ptr + M_block, mask=E_mask, other=0)
-    if x_grouped:
-        M_in_idx = M_block
-    else:
-        M_in_idx = M_idx // FAN_OUT
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_TYPE)
+    E_first_idx = tl.min(E_idxs)
+    E_last_idx = tl.minimum(tl.max(E_idxs), E - 1)
+    M_idx = tl.load(grouped_idx_ptr + M_block, mask=M_boundary_mask, other=0).to(tl.int32)
+
+    # iters = E_last_idx - E_first_idx + 1
+    # for i in range(iters):
+    #     E_idx = i + E_first_idx
+    for E_idx in range(E_first_idx, E_last_idx + 1):
+        E_mask = E_idxs == E_idx
+        # E_M_idx = tl.where(E_mask, M_idx, 0)
+        E_M_idx = M_idx
+        if x_grouped:
+            M_in_idx = M_block
+        else:
+            M_in_idx = E_M_idx // FAN_OUT
+
+        acc = compute_expert_block(
+            E_idx, E_mask,
+            M_in_idx,
+            N_block, N_mask,
+            X_ptr, stride_xm, stride_xk,
+            W_ptr, stride_we, stride_wk, stride_wn,
+            K,
+            acc,
+            allow_tf32,
+            no_k_mask, no_n_mask,
+            ACC_TYPE, BLOCK_K
+        )
     if y_grouped:
         M_out_idx = M_block
     else:
         M_out_idx = M_idx
 
-    acc = compute_expert_block(
-        E_idx, E_mask,
-        M_in_idx,
-        N_block, N_mask,
-        X_ptr, stride_xm, stride_xk,
-        W_ptr, stride_we, stride_wk, stride_wn,
-        K,
-        acc,
-        allow_tf32,
-        no_k_mask, no_n_mask,
-        ACC_TYPE, BLOCK_K
-    )
-
     Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
-    tl.store(Y_blk_ptrs, acc, mask=E_mask[:, None] & N_mask[None, :])
+    tl.store(Y_blk_ptrs, acc, mask=M_boundary_mask[:, None] & N_mask[None, :])
 
 @triton.jit
 def compute_expert_block(
@@ -91,14 +100,13 @@ def compute_expert_block(
         ACC_TYPE, BLOCK_K):
 
     K_block = tl.arange(0, BLOCK_K)
-
     X_blk_ptrs = X_ptr + M_in_idx[:, None] * stride_xm + K_block[None, :] * stride_xk
     W_blk_ptrs = W_ptr + K_block[:, None] * stride_wk + N_block[None, :] * stride_wn + E_idx * stride_we
     iters = tl.cdiv(K, BLOCK_K)
+
     for K_block_id in range(0, iters):
         if no_k_mask:
             x = tl.load(X_blk_ptrs, mask=E_mask[:, None])
-
             if no_n_mask or K_block_id < (iters - 1):
                 w = tl.load(W_blk_ptrs)
             else:
@@ -154,7 +162,8 @@ def groupXtY_triton_kernel(
     pid1 = tl.program_id(axis=1)
     num0 = tl.num_programs(0)
     num1 = tl.num_programs(1)
-    pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
+    # pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
+    pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
 
     K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
     E_idx = pid0 // K_BLOCK_COUNT
