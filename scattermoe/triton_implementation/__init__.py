@@ -3,7 +3,7 @@ from typing import Callable
 import torch
 import torch.nn as nn
 
-from .ops import padded_block_indices, scattered_experts
+from .ops import expert_boundaries, scattered_experts
 
 
 class ParallelExperts(nn.Module):
@@ -28,7 +28,6 @@ class ParallelExperts(nn.Module):
         k,
         sorted_expert_idxs,
         sorted_scattered_idxs,
-        padded_block_idxs,
         expert_offsets,
         gates=None,
         grouped_in=False,
@@ -40,7 +39,6 @@ class ParallelExperts(nn.Module):
             k,
             sorted_expert_idxs,
             sorted_scattered_idxs,
-            padded_block_idxs,
             expert_offsets,
             gates,
             grouped_in,
