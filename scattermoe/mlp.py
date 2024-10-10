@@ -2,7 +2,6 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-# from . import kernels
 from .triton_implementation import ParallelExperts, expert_boundaries
 
 class GLUMLP(nn.Module):

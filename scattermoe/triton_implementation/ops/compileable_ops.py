@@ -99,7 +99,7 @@ def scatter2scatter(
     x_grouped: bool = False,
     y_grouped: bool = False,
 ) -> None:
-    if torch.compiler.is_compiling():
+    if False: # torch.compiler.is_compiling():
         _scatter2scatter_compileable(
             X=X,
             W=W,
@@ -160,7 +160,7 @@ def _group_bwd_W_compileable(
 
 
 def group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor, DW: torch.Tensor, E: int) -> None:
-    if torch.compiler.is_compiling():
+    if False: # torch.compiler.is_compiling():
         _group_bwd_W_compileable(DY=DY, X=X, expert_offsets=expert_offsets, DW=DW, E=E)
     else:
         _group_bwd_W(DY=DY, X=X, expert_offsets=expert_offsets, DW=DW, E=E)
@@ -218,7 +218,7 @@ def group(
     coeff: torch.Tensor | None = None,
     fan_out: int = 1,
 ) -> None:
-    if torch.compiler.is_compiling():
+    if False: # torch.compiler.is_compiling():
         _group_compileable(A=A, sorted_expert_idxs=sorted_expert_idxs, out=out, coeff=coeff, fan_out=fan_out)
     else:
         _group(A=A, sorted_expert_idxs=sorted_expert_idxs, out=out, coeff=coeff, fan_out=fan_out)
