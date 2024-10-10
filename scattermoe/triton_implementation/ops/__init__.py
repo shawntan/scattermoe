@@ -121,14 +121,14 @@ class _ScatteredExperts(torch.autograd.Function):
 
             d_expanded_input = grouped_x
 
-        d_weights = torch.zeros(
-            expert_weights.size(0),
-            grouped_grad_out.size(-1),
-            grouped_x.size(-1),
-            device=grouped_grad_out.device,
-            dtype=grouped_grad_out.dtype,
-        ).permute(0, 2, 1)
-
+        # d_weights = torch.zeros(
+        #     expert_weights.size(0),
+        #     grouped_grad_out.size(-1),
+        #     grouped_x.size(-1),
+        #     device=grouped_grad_out.device,
+        #     dtype=grouped_grad_out.dtype,
+        # ).permute(0, 2, 1)
+        d_weights = torch.zeros_like(expert_weights)
         group_bwd_W(
             DY=grouped_grad_out,
             X=grouped_x,

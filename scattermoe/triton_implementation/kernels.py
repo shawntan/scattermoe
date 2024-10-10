@@ -161,7 +161,8 @@ def groupXtY_triton_kernel(
     pid1 = tl.program_id(axis=1)
     num0 = tl.num_programs(0)
     num1 = tl.num_programs(1)
-    pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
+    # pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
+    pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
 
     K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
     E_idx = pid0 // K_BLOCK_COUNT
