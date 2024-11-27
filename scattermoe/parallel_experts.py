@@ -102,6 +102,7 @@ class ParallelLinear(torch.autograd.Function):
                 DY=grouped_grad_out,
                 X=grouped_x,
                 expert_offsets=expert_offsets,
+                sorted_expert_idxs=sorted_expert_idxs,
                 DW=d_weights,
                 E=expert_weights.size(0)
             )

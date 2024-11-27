@@ -132,6 +132,7 @@ class _ScatteredExperts(torch.autograd.Function):
         group_bwd_W(
             DY=grouped_grad_out,
             X=grouped_x,
+            sorted_expert_idxs=sorted_expert_idxs,
             expert_offsets=expert_offsets,
             DW=d_weights,
             E=expert_weights.size(0),

@@ -123,9 +123,9 @@ def scatter2scatter(
         )
 
 
-def _group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor, DW: torch.Tensor, E: int) -> None:
-    grid = lambda meta: (E * triton.cdiv(meta["K"], meta["BLOCK_K"]), triton.cdiv(meta["N"], meta["BLOCK_N"]))
+def __group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor, DW: torch.Tensor, E: int) -> None:
 
+    grid = lambda meta: (E * triton.cdiv(meta["K"], meta["BLOCK_K"]), triton.cdiv(meta["N"], meta["BLOCK_N"]))
     groupXtY_triton_kernel[grid](
         # DY_ptr, stride_dym, stride_dyk,
         DY,
@@ -150,6 +150,33 @@ def _group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor
         allow_tf32=torch.backends.cudnn.allow_tf32 and ALLOW_TF32,
     )
 
+def _group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor,
+                 sorted_expert_idxs: torch.Tensor, DW: torch.Tensor, E: int) -> None:
+    grid = lambda meta: (
+        triton.cdiv(meta["K"], meta["BLOCK_K"]),
+        triton.cdiv(meta["N"], meta["BLOCK_N"]),
+        triton.cdiv(meta['M'], meta['BLOCK_M']),
+    )
+    groupXtY_triton_kernel[grid](
+        # DY_ptr, stride_dym, stride_dyk,
+        DY, DY.stride(0), DY.stride(1),
+        # X_ptr, stride_xm, stride_xn,
+        X, X.stride(0), X.stride(1),
+        # DW_ptr, stride_dwe, stride_dwk, stride_dwn,
+        DW, DW.stride(0), DW.stride(1), DW.stride(2),
+        # expert_offsets_ptr,
+        expert_offsets,
+        # sorted_experts_idxs,
+        sorted_expert_idxs,
+        # K: tl.constexpr, N: tl.constexpr,
+        M=DY.size(0), N=DY.size(-1), K=X.size(-1), E=E,
+        # ACC_TYPE: tl.constexpr,
+        ACC_TYPE=tl.float32,
+        allow_tf32=torch.backends.cudnn.allow_tf32 and ALLOW_TF32,
+    )
+
+
+
 
 # custom op is needed because of https://github.com/pytorch/pytorch/issues/136394
 @torch_custom_op(f"{LIBRARY_NAME}::group_bwd_W", mutates_args={"DW"})
@@ -159,11 +186,13 @@ def _group_bwd_W_compileable(
     _group_bwd_W(DY=DY, X=X, expert_offsets=expert_offsets, DW=DW, E=E)
 
 
-def group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor, DW: torch.Tensor, E: int) -> None:
+def group_bwd_W(DY: torch.Tensor, X: torch.Tensor, expert_offsets: torch.Tensor,
+                sorted_expert_idxs: torch.Tensor, DW: torch.Tensor, E: int) -> None:
     if False: # torch.compiler.is_compiling():
         _group_bwd_W_compileable(DY=DY, X=X, expert_offsets=expert_offsets, DW=DW, E=E)
     else:
-        _group_bwd_W(DY=DY, X=X, expert_offsets=expert_offsets, DW=DW, E=E)
+        _group_bwd_W(DY=DY, X=X, expert_offsets=expert_offsets,
+                     sorted_expert_idxs=sorted_expert_idxs, DW=DW, E=E)
 
 
 def _group(

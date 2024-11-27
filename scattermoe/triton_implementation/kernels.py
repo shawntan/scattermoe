@@ -1,6 +1,6 @@
 import triton
 import triton.language as tl
-
+import torch
 
 BLOCK_M = 128
 
@@ -123,6 +123,7 @@ def compute_expert_block(
     return acc
 
 
+
 @triton.autotune(
     configs=[
         # different block M and reducing stages
@@ -138,7 +139,7 @@ def compute_expert_block(
     key=["N", "K"],
 )
 @triton.jit
-def groupXtY_triton_kernel(
+def groupXtY_triton_kernel_back(
     DY_ptr,
     stride_dym,
     stride_dyk,
@@ -219,6 +220,153 @@ def groupXtY_triton_kernel(
         DW_blk_ptrs = DW_ptr + E_idx * stride_dwe + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn
         acc = acc.to(DW_blk_ptrs.dtype.element_ty)
         tl.store(DW_blk_ptrs, acc, mask=K_mask[:, None] & N_mask[None, :])
+
+
+
+def heuristic_init(meta):
+    result = torch.zeros(
+        (meta['DW_ptr'].size(0),
+         triton.cdiv(meta['K'], meta['BLOCK_K']),
+         triton.cdiv(meta['N'], meta['BLOCK_N'])),
+        dtype=torch.int32, device=meta['DW_ptr'].device
+    )
+    return result
+
+
+
+@triton.autotune(
+    configs=[
+        # different block M and reducing stages
+        # triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 32}, num_stages=4, num_warps=4),
+        # triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 128}, num_stages=1, num_warps=4),
+        triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 64, "BLOCK_M_INNER": 32}, num_stages=2, num_warps=4),
+        # keep 4 stages and keep two 64 block sizes
+        # - NOTE: these can get good performances for low M, but for large M the variation
+        # triton.Config({'BLOCK_N': 128, 'BLOCK_K': 64, 'BLOCK_M': 64}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_N': 64, 'BLOCK_K': 128, 'BLOCK_M': 64}, num_stages=4, num_warps=4),
+        # triton.Config({'BLOCK_N': 64, 'BLOCK_K': 128, 'BLOCK_M': 64}, num_stages=4, num_warps=4),
+    ],
+    key=["N", "K"],
+)
+@triton.heuristics(
+    values={
+        "DW_count_ptr": heuristic_init,
+        "DW_lock_ptr": heuristic_init
+    }
+)
+
+@triton.jit
+def groupXtY_triton_kernel(
+    DY_ptr, stride_dym, stride_dyk,
+    X_ptr, stride_xm, stride_xn,
+    DW_ptr, stride_dwe, stride_dwk, stride_dwn,
+    expert_offsets_ptr,
+    sorted_expert_idxs_ptr,
+    M: tl.constexpr,
+    K: tl.constexpr,
+    N: tl.constexpr,
+    E: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_M_INNER: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    ACC_TYPE: tl.constexpr,
+    allow_tf32: tl.constexpr,
+    DW_count_ptr, DW_lock_ptr, 
+):
+
+    pid0 = tl.program_id(axis=0)
+    pid1 = tl.program_id(axis=1)
+    pid2 = tl.program_id(axis=2)
+    num0 = tl.num_programs(0)
+    num1 = tl.num_programs(1)
+    num2 = tl.num_programs(2)
+    # pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
+    # pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
+    # K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
+    K_block_id = pid0
+    N_block_id = pid1
+    M_block_id = pid2
+
+
+    K_block = K_block_id * BLOCK_K + tl.arange(0, BLOCK_K)
+    K_mask = K_block < K
+    # K_block = tl.max_contiguous(tl.multiple_of(K_block % K, BLOCK_K), BLOCK_K)
+
+    N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    N_mask = N_block < N
+    # N_block = tl.max_contiguous(tl.multiple_of(N_block % N, BLOCK_N), BLOCK_N)
+    no_k_mask = K % BLOCK_K == 0
+    no_n_mask = N % BLOCK_N == 0
+
+    M_block = M_block_id * BLOCK_M + tl.arange(0, BLOCK_M)
+    xt_blk_ptrs = X_ptr + K_block[:, None] * stride_xn + M_block[None, :] * stride_xm
+    dy_blk_ptrs = DY_ptr + M_block[:, None] * stride_dym + N_block[None, :] * stride_dyk
+
+    M_mask = M_block < M
+    if no_k_mask:
+        xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
+    else:
+        xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None] & M_mask[None, :])
+
+    if no_n_mask:
+        dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
+    else:
+        dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
+
+    E_idxs = tl.load(sorted_expert_idxs_ptr + M_block, mask=M_mask, other=E)
+    E_first_idx = tl.min(E_idxs)
+    E_last_idx = tl.minimum(tl.max(E_idxs), E - 1)
+
+    if E_first_idx == E_last_idx:
+        E_idx = E_first_idx
+        delta = tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
+        locked_add(
+            Lock_ptr=DW_lock_ptr + E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
+            Count_ptr=DW_count_ptr + E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
+            A_ptrs=DW_ptr + E_idx * stride_dwe + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn,
+            a=delta,
+            mask=K_mask[:, None] & N_mask[None, :],
+            NO_MASK=no_k_mask and no_n_mask
+        )
+    else:
+        for E_idx in range(E_first_idx, E_last_idx + 1):
+            E_mask = E_idxs == E_idx
+            xt_ = tl.where(E_mask[None, :], xt, 0.).to(xt.dtype)
+            # dy_ = tl.where(E_mask[:, None], dy, 0.)
+            delta = tl.dot(xt_, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
+            locked_add(
+                Lock_ptr=DW_lock_ptr + E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
+                Count_ptr=DW_count_ptr + E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
+                A_ptrs=DW_ptr + E_idx * stride_dwe + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn,
+                a=delta,
+                mask=K_mask[:, None] & N_mask[None, :],
+                NO_MASK=no_k_mask and no_n_mask
+            )
+
+
+@triton.jit
+def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, mask, NO_MASK):
+    locked = tl.atomic_cas(Lock_ptr, 0, 1)
+    # BEGIN SINGLE THREAD
+    while locked == 1:
+        locked = tl.atomic_cas(Lock_ptr, 0, 1)
+
+    count = tl.load(Count_ptr)
+    if NO_MASK:
+        if count == 0:
+            tl.store(A_ptrs, a)
+            tl.store(Count_ptr, 1)
+        else:
+            tl.store(A_ptrs, a + tl.load(A_ptrs))
+    else:
+        if count == 0:
+            tl.store(A_ptrs, a, mask=mask)
+            tl.store(Count_ptr, 1)
+        else:
+            tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
+    # END SINGLE THREAD
+    tl.atomic_xchg(Lock_ptr, 0)
 
 
 @triton.autotune(configs=[triton.Config({"BLOCK_N": 256, "BLOCK_K": 128}, num_stages=4, num_warps=4)], key=["K"])

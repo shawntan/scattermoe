@@ -18,13 +18,14 @@ def dumb_forward(m, x, expert_p, expert_idxs):
     return output
 
 class TestClass:
-    @pytest.mark.parametrize('length, x_dim, h_dim, E, k, dtype', [
-        (L, xd, (4 * xd) // k, 8, k, dt)
-        for L in [1, 256, 512]
-        for dt in [torch.float32]
-        for xd in [128, 256, 512, 600, 100]
+    @pytest.mark.parametrize('dtype', [torch.float32])
+    @pytest.mark.parametrize('E', [4, 8, 16, 32])
+    @pytest.mark.parametrize('x_dim, h_dim, k', [
+        (xd, (4 * xd) // k, k)
+        for xd in [512, 1024, 2048]
         for k in [2, 3, 4]
     ])
+    @pytest.mark.parametrize('length', [1, 256, 512, 1024, 2048, 4096])
     def test_mlp_correctness(self, length, x_dim, h_dim, E, k, dtype):
         logits = torch.randn(length, E, dtype=dtype)
         weights = torch.softmax(logits.float(), axis=-1).cuda().to(dtype)
