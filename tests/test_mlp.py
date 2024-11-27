@@ -25,7 +25,7 @@ class TestClass:
         for xd in [512, 1024, 2048]
         for k in [2, 3, 4]
     ])
-    @pytest.mark.parametrize('length', [1, 256, 512, 1024, 2048, 4096])
+    @pytest.mark.parametrize('length', [1, 256, 512, 1024, 2048, 4096][::-1])
     def test_mlp_correctness(self, length, x_dim, h_dim, E, k, dtype):
         logits = torch.randn(length, E, dtype=dtype)
         weights = torch.softmax(logits.float(), axis=-1).cuda().to(dtype)

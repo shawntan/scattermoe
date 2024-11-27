@@ -239,7 +239,8 @@ def heuristic_init(meta):
         # different block M and reducing stages
         # triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 32}, num_stages=4, num_warps=4),
         # triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 128}, num_stages=1, num_warps=4),
-        triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 64, "BLOCK_M_INNER": 32}, num_stages=2, num_warps=4),
+        # triton.Config({"BLOCK_N": 64, "BLOCK_K": 64, "BLOCK_M": 1024, "BLOCK_M_INNER": 64}, num_stages=2, num_warps=4),
+        triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 2048, "BLOCK_M_INNER": 64}, num_stages=4, num_warps=8),
         # keep 4 stages and keep two 64 block sizes
         # - NOTE: these can get good performances for low M, but for large M the variation
         # triton.Config({'BLOCK_N': 128, 'BLOCK_K': 64, 'BLOCK_M': 64}, num_stages=4, num_warps=4),
@@ -251,7 +252,8 @@ def heuristic_init(meta):
 @triton.heuristics(
     values={
         "DW_count_ptr": heuristic_init,
-        "DW_lock_ptr": heuristic_init
+        "DW_lock_ptr": heuristic_init,
+
     }
 )
 
@@ -280,9 +282,9 @@ def groupXtY_triton_kernel(
     pid2 = tl.program_id(axis=2)
     num0 = tl.num_programs(0)
     num1 = tl.num_programs(1)
-    num2 = tl.num_programs(2)
+    # num2 = tl.num_programs(2)
     # pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
-    # pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
+    pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
     # K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
     K_block_id = pid0
     N_block_id = pid1
@@ -299,59 +301,102 @@ def groupXtY_triton_kernel(
     no_k_mask = K % BLOCK_K == 0
     no_n_mask = N % BLOCK_N == 0
 
-    M_block = M_block_id * BLOCK_M + tl.arange(0, BLOCK_M)
+    M_block = M_block_id * BLOCK_M + tl.arange(0, BLOCK_M_INNER)
+    M_last_idx = (M_block_id + 1) * BLOCK_M - 1
     xt_blk_ptrs = X_ptr + K_block[:, None] * stride_xn + M_block[None, :] * stride_xm
     dy_blk_ptrs = DY_ptr + M_block[:, None] * stride_dym + N_block[None, :] * stride_dyk
 
-    M_mask = M_block < M
-    if no_k_mask:
-        xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
-    else:
-        xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None] & M_mask[None, :])
+    iters = BLOCK_M // BLOCK_M_INNER
 
-    if no_n_mask:
-        dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
-    else:
-        dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
+    prev_E_idx = -1
+    acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=ACC_TYPE)
+    DW_block_ptrs = DW_ptr + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn
+    KN_mask = K_mask[:, None] & N_mask[None, :]
+    for i in tl.range(iters):
 
-    E_idxs = tl.load(sorted_expert_idxs_ptr + M_block, mask=M_mask, other=E)
-    E_first_idx = tl.min(E_idxs)
-    E_last_idx = tl.minimum(tl.max(E_idxs), E - 1)
+        M_mask = M_block < M
+        no_m_mask = M_last_idx < M
 
-    if E_first_idx == E_last_idx:
-        E_idx = E_first_idx
-        delta = tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
-        locked_add(
-            Lock_ptr=DW_lock_ptr + E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
-            Count_ptr=DW_count_ptr + E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
-            A_ptrs=DW_ptr + E_idx * stride_dwe + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn,
-            a=delta,
-            mask=K_mask[:, None] & N_mask[None, :],
-            NO_MASK=no_k_mask and no_n_mask
-        )
-    else:
-        for E_idx in range(E_first_idx, E_last_idx + 1):
-            E_mask = E_idxs == E_idx
-            xt_ = tl.where(E_mask[None, :], xt, 0.).to(xt.dtype)
-            # dy_ = tl.where(E_mask[:, None], dy, 0.)
-            delta = tl.dot(xt_, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
-            locked_add(
-                Lock_ptr=DW_lock_ptr + E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
-                Count_ptr=DW_count_ptr + E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
-                A_ptrs=DW_ptr + E_idx * stride_dwe + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn,
-                a=delta,
-                mask=K_mask[:, None] & N_mask[None, :],
-                NO_MASK=no_k_mask and no_n_mask
-            )
+        if no_m_mask:
+            if no_n_mask:
+                dy = tl.load(dy_blk_ptrs)
+            else:
+                dy = tl.load(dy_blk_ptrs, mask=N_mask[None, :])
+            if no_k_mask:
+                xt = tl.load(xt_blk_ptrs)
+            else:
+                xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None])
+            E_idxs = tl.load(sorted_expert_idxs_ptr + M_block).to(tl.int32)
+        else:
+            if no_n_mask:
+                dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
+            else:
+                dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
+            if no_k_mask:
+                xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
+            else:
+                xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :] & K_mask[:, None])
+            E_idxs = tl.load(sorted_expert_idxs_ptr + M_block, mask=M_mask, other=E).to(tl.int32)
+
+        E_first_idx = tl.min(E_idxs)
+        E_last_idx = tl.minimum(tl.max(E_idxs), E - 1)
+
+        if E_first_idx == E_last_idx:
+            E_idx = E_first_idx
+            if prev_E_idx != -1 and E_idx != prev_E_idx: # if E_idx changed, write to HBM
+                locked_add(
+                    Lock_ptr=DW_lock_ptr + K_block_id * num1 + N_block_id + prev_E_idx * num0 * num1,
+                    Count_ptr=DW_count_ptr + K_block_id * num1 + N_block_id + prev_E_idx * num0 * num1,
+                    A_ptrs=DW_block_ptrs + prev_E_idx * stride_dwe,
+                    a=acc,
+                    mask=KN_mask,
+                    NO_MASK=no_k_mask and no_n_mask
+                )
+                acc *= 0.
+            acc = tl.dot(xt, dy, acc=acc, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
+            prev_E_idx = E_idx
+
+        else:
+            for E_idx in range(E_first_idx, E_last_idx + 1):
+                E_mask = E_idxs == E_idx
+                # dy_ = tl.where(E_mask[:, None], dy, 0.)
+                xt_ = tl.where(E_mask[None, :], xt, 0.).to(xt.dtype)
+                if prev_E_idx != -1 and E_idx != prev_E_idx: # if E_idx changed, write to HBM
+                    locked_add(
+                        Lock_ptr=DW_lock_ptr + prev_E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
+                        Count_ptr=DW_count_ptr + prev_E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
+                        A_ptrs=DW_block_ptrs + prev_E_idx * stride_dwe,
+                        a=acc,
+                        mask=KN_mask,
+                        NO_MASK=no_k_mask and no_n_mask
+                    )
+                    acc *= 0.
+                acc = tl.dot(xt_, dy, acc=acc, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
+                prev_E_idx = E_idx
+
+        M_last_idx += BLOCK_M_INNER
+        M_block += BLOCK_M_INNER
+        xt_blk_ptrs += BLOCK_M_INNER * stride_xm
+        dy_blk_ptrs += BLOCK_M_INNER * stride_dym
+
+    locked_add(
+        Lock_ptr=DW_lock_ptr + prev_E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
+        Count_ptr=DW_count_ptr + prev_E_idx * num0 * num1 + K_block_id * num1 + N_block_id,
+        A_ptrs=DW_block_ptrs + prev_E_idx * stride_dwe,
+        a=acc,
+        mask=KN_mask,
+        NO_MASK=no_k_mask and no_n_mask
+    )
+
 
 
 @triton.jit
 def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, mask, NO_MASK):
     locked = tl.atomic_cas(Lock_ptr, 0, 1)
-    # BEGIN SINGLE THREAD
     while locked == 1:
         locked = tl.atomic_cas(Lock_ptr, 0, 1)
 
+    # BEGIN SINGLE THREAD
     count = tl.load(Count_ptr)
     if NO_MASK:
         if count == 0:
@@ -366,6 +411,7 @@ def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, mask, NO_MASK):
         else:
             tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
     # END SINGLE THREAD
+
     tl.atomic_xchg(Lock_ptr, 0)
 
 
