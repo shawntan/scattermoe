@@ -303,7 +303,6 @@ def groupXtY_triton_kernel(
     N_mask = N_block < N
     # N_block = tl.max_contiguous(tl.multiple_of(N_block % N, BLOCK_N), BLOCK_N)
     M_block = M_block_id * BLOCK_M + tl.arange(0, BLOCK_M_INNER)
-    M_inner_last_idx = (M_block_id + 1) * BLOCK_M - 1
 
     E_M_first_idx = tl.load(sorted_expert_idxs_ptr + M_block_id * BLOCK_M).to(tl.int32)
     if ((M_block_id + 1) * BLOCK_M - 1) < M:
@@ -321,8 +320,9 @@ def groupXtY_triton_kernel(
     DW_block_ptrs = DW_ptr + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn
     KN_mask = K_mask[:, None] & N_mask[None, :]
 
+    M_inner_first_idx = M_block_id * BLOCK_M
+    M_inner_last_idx = (M_block_id + 1) * BLOCK_M - 1
     if E_M_first_idx == E_M_last_idx: # If entire BLOCK_M is one expert.
-
         E_idx = E_M_first_idx
         prev_E_idx = E_idx
         for i in tl.range(iters):
@@ -338,18 +338,20 @@ def groupXtY_triton_kernel(
             dy_blk_ptrs += BLOCK_M_INNER * stride_dym
 
     else:
+        prev_E_last_idx = -1 
         for i in tl.range(iters):
             M_mask = M_block < M
             no_m_mask = M_inner_last_idx < M
             dy, xt = load_dy_xt(xt_blk_ptrs, dy_blk_ptrs, M_mask, K_mask, N_mask,no_m_mask, NO_K_MASK, NO_N_MASK)
-            if no_m_mask:
-                E_idxs = tl.load(sorted_expert_idxs_ptr + M_block).to(tl.int32)
+
+            E_first_idx = tl.load(sorted_expert_idxs_ptr + M_inner_first_idx).to(tl.int32)
+            if M_inner_first_idx + BLOCK_M_INNER - 1 < M:
+                E_last_idx = tl.load(sorted_expert_idxs_ptr + M_inner_first_idx + BLOCK_M_INNER - 1).to(tl.int32)
             else:
-                E_idxs = tl.load(sorted_expert_idxs_ptr + M_block, mask=M_mask, other=E).to(tl.int32)
-            E_first_idx = tl.min(E_idxs)
-            E_last_idx = tl.minimum(tl.max(E_idxs), E - 1)
+                E_last_idx = E - 1
+
             if E_first_idx == E_last_idx: # If entire BLOCK_M_INNER is one expert
-                E_idx = E_first_idx
+                E_idx = E_last_idx
                 if prev_E_idx != -1 and E_idx != prev_E_idx: # if E_idx changed, write to HBM
                     locked_add(
                         Lock_ptr=DW_lock_ptr + K_block_id * num1 + N_block_id + prev_E_idx * num0 * num1,
@@ -363,8 +365,12 @@ def groupXtY_triton_kernel(
                     acc = tl.zeros_like(acc)
                 acc = tl.dot(xt, dy, acc=acc, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
                 prev_E_idx = E_idx
-
             else:
+                if no_m_mask:
+                    E_idxs = tl.load(sorted_expert_idxs_ptr + M_block).to(tl.int32)
+                else:
+                    E_idxs = tl.load(sorted_expert_idxs_ptr + M_block, mask=M_mask, other=E).to(tl.int32)
+
                 for E_idx in range(E_first_idx, E_last_idx + 1):
                     E_mask = E_idxs == E_idx
                     # dy_ = tl.where(E_mask[:, None], dy, 0.)
@@ -382,7 +388,8 @@ def groupXtY_triton_kernel(
                         acc = tl.zeros_like(acc)
                     acc = tl.dot(xt_, dy, acc=acc, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
                     prev_E_idx = E_idx
-
+            prev_E_last_idx = E_idx
+            M_inner_first_idx += BLOCK_M_INNER
             M_inner_last_idx += BLOCK_M_INNER
             M_block += BLOCK_M_INNER
             xt_blk_ptrs += BLOCK_M_INNER * stride_xm
