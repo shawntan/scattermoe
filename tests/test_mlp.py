@@ -19,7 +19,7 @@ def dumb_forward(m, x, expert_p, expert_idxs):
 
 class TestClass:
     @pytest.mark.parametrize('dtype', [torch.float32])
-    @pytest.mark.parametrize('E', [4, 8, 16, 32])
+    @pytest.mark.parametrize('E', [8, 4, 16, 32])
     @pytest.mark.parametrize('x_dim, h_dim, k', [
         (xd, (4 * xd) // k, k)
         for xd in [512, 1024, 2048]
@@ -59,6 +59,7 @@ class TestClass:
         err_dW1 = torch.abs(dW1_ - dW1)
         err_dW2 = torch.abs(dW2_ - dW2)
         tolerance = 1e-2
+        print()
         print("Y error:", err_Y.max())
         print("dg:", err_dg.max())
         print("dW1:", err_dW1.max())
