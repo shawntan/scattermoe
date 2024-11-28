@@ -235,19 +235,21 @@ def heuristic_init(meta):
 
 
 @triton.autotune(
+    # configs=[
+        # triton.Config({"BLOCK_N": bn, "BLOCK_K": bk, "BLOCK_M": bmi * bm_factor, "BLOCK_M_INNER": bmi},
+                    #   num_stages=num_stages, num_warps=num_warps)
+        # for bn in [64, 128]
+        # for bk in [64, 128]
+        # for bmi in [64, 128]
+        # for bm_factor in [4, 8, 16]
+        # for num_stages in [2, 4, 6]
+        # for num_warps in [4, 8]
+    # ],
     configs=[
-        # different block M and reducing stages
-        # triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 32}, num_stages=4, num_warps=4),
-        # triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 128}, num_stages=1, num_warps=4),
-        # triton.Config({"BLOCK_N": 64, "BLOCK_K": 64, "BLOCK_M": 1024, "BLOCK_M_INNER": 64}, num_stages=2, num_warps=4),
-        triton.Config({"BLOCK_N": 128, "BLOCK_K": 128, "BLOCK_M": 1024, "BLOCK_M_INNER": 64}, num_stages=2, num_warps=8),
-        # keep 4 stages and keep two 64 block sizes
-        # - NOTE: these can get good performances for low M, but for large M the variation
-        # triton.Config({'BLOCK_N': 128, 'BLOCK_K': 64, 'BLOCK_M': 64}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_N': 64, 'BLOCK_K': 128, 'BLOCK_M': 64}, num_stages=4, num_warps=4),
-        # triton.Config({'BLOCK_N': 64, 'BLOCK_K': 128, 'BLOCK_M': 64}, num_stages=4, num_warps=4),
+        triton.Config({"BLOCK_N": 128, "BLOCK_K": 64, "BLOCK_M": 1024, "BLOCK_M_INNER": 64},
+                     num_stages=6, num_warps=4)
     ],
-    key=["N", "K"],
+    key=["N", "K", "E"],
 )
 @triton.heuristics(
     values={
@@ -278,7 +280,7 @@ def groupXtY_triton_kernel(
     ACC_TYPE: tl.constexpr,
     allow_tf32: tl.constexpr,
     DW_count_ptr, DW_lock_ptr, 
-
+    SWIZZLE_FACTOR: tl.constexpr=128,
 ):
 
     pid0 = tl.program_id(axis=0)
@@ -288,7 +290,7 @@ def groupXtY_triton_kernel(
     num1 = tl.num_programs(1)
     # num2 = tl.num_programs(2)
     # pid0, pid1 = tl.swizzle2d(pid0, pid1, num0, num1, 4)
-    pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, 128)
+    pid1, pid0 = tl.swizzle2d(pid1, pid0, num1, num0, SWIZZLE_FACTOR)
     # K_BLOCK_COUNT = tl.cdiv(K, BLOCK_K)
     K_block_id = pid0
     N_block_id = pid1
@@ -338,10 +340,11 @@ def groupXtY_triton_kernel(
             dy_blk_ptrs += BLOCK_M_INNER * stride_dym
 
     else:
-        prev_E_last_idx = -1 
+        skip_check = False
+
         for i in tl.range(iters):
             M_mask = M_block < M
-            no_m_mask = M_inner_last_idx < M
+            no_m_mask = M_inner_first_idx + BLOCK_M_INNER - 1 < M
             dy, xt = load_dy_xt(xt_blk_ptrs, dy_blk_ptrs, M_mask, K_mask, N_mask,no_m_mask, NO_K_MASK, NO_N_MASK)
 
             E_first_idx = tl.load(sorted_expert_idxs_ptr + M_inner_first_idx).to(tl.int32)
@@ -349,6 +352,26 @@ def groupXtY_triton_kernel(
                 E_last_idx = tl.load(sorted_expert_idxs_ptr + M_inner_first_idx + BLOCK_M_INNER - 1).to(tl.int32)
             else:
                 E_last_idx = E - 1
+
+            """
+            if skip_check:
+                E_first_idx = E_M_last_idx
+                E_last_idx = E_M_last_idx
+            else:
+                E_first_idx = tl.load(sorted_expert_idxs_ptr + M_inner_first_idx).to(tl.int32)
+
+                if E_first_idx == E_M_last_idx:
+                    E_last_idx = E_first_idx
+                    skip_check = True
+                else:
+                    if M_inner_first_idx + BLOCK_M_INNER - 1 < M:
+                        E_last_idx = tl.load(sorted_expert_idxs_ptr + M_inner_first_idx + BLOCK_M_INNER - 1).to(tl.int32)
+                    else:
+                        E_last_idx = E - 1
+                if E_last_idx == E_M_last_idx:
+                    skip_check = True
+            """
+
 
             if E_first_idx == E_last_idx: # If entire BLOCK_M_INNER is one expert
                 E_idx = E_last_idx
@@ -388,7 +411,7 @@ def groupXtY_triton_kernel(
                         acc = tl.zeros_like(acc)
                     acc = tl.dot(xt_, dy, acc=acc, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
                     prev_E_idx = E_idx
-            prev_E_last_idx = E_idx
+
             M_inner_first_idx += BLOCK_M_INNER
             M_inner_last_idx += BLOCK_M_INNER
             M_block += BLOCK_M_INNER
@@ -430,28 +453,31 @@ def load_dy_xt(xt_blk_ptrs, dy_blk_ptrs, M_mask, K_mask, N_mask, no_m_mask, no_k
 
 @triton.jit
 def locked_add(Lock_ptr, Count_ptr, A_ptrs, a, mask, NO_MASK, NO_LOCK=False):
-    if not NO_LOCK:
+    if NO_LOCK:
+        if NO_MASK:
+            tl.store(A_ptrs, a)
+        else:
+            tl.store(A_ptrs, a, mask=mask)
+    else:
         locked = tl.atomic_cas(Lock_ptr, 0, 1)
         while locked == 1:
             locked = tl.atomic_cas(Lock_ptr, 0, 1)
 
-    # BEGIN SINGLE THREAD
-    count = tl.load(Count_ptr)
-    if NO_MASK:
-        if count == 0:
-            tl.store(A_ptrs, a)
-            tl.store(Count_ptr, 1)
+        # BEGIN SINGLE THREAD
+        count = tl.load(Count_ptr)
+        if NO_MASK:
+            if count == 0:
+                tl.store(A_ptrs, a)
+                tl.store(Count_ptr, 1)
+            else:
+                tl.store(A_ptrs, a + tl.load(A_ptrs))
         else:
-            tl.store(A_ptrs, a + tl.load(A_ptrs))
-    else:
-        if count == 0:
-            tl.store(A_ptrs, a, mask=mask)
-            tl.store(Count_ptr, 1)
-        else:
-            tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
-    # END SINGLE THREAD
-
-    if not NO_LOCK:
+            if count == 0:
+                tl.store(A_ptrs, a, mask=mask)
+                tl.store(Count_ptr, 1)
+            else:
+                tl.store(A_ptrs, a + tl.load(A_ptrs, mask=mask), mask=mask)
+        # END SINGLE THREAD
         tl.atomic_xchg(Lock_ptr, 0)
 
 
