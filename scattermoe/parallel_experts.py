@@ -1,9 +1,11 @@
 import torch
 import torch.nn as nn
 from . import kernels
+from torch.amp import custom_fwd, custom_bwd
 
 class ParallelLinear(torch.autograd.Function):
     @staticmethod
+    @custom_fwd(device_type="cuda")
     def forward(
         ctx, x, expert_weights, k,
         sorted_expert_idxs, sorted_scattered_idxs,
@@ -40,6 +42,7 @@ class ParallelLinear(torch.autograd.Function):
         ctx.k = k
         return output
     @staticmethod
+    @custom_bwd(device_type="cuda")
     def backward(ctx, grad_out):
         (x, expert_weights,
          sorted_expert_idxs,
