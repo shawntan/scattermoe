@@ -137,7 +137,6 @@ def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
         assert out.size(0) == L_scattered and out.size(1) == y_dim
         O = out
 
-    # with torch.cuda.device(X.device):
     scatter2scatter_compileable(O, W, X, k, padded_block_idxs, sorted_expert_idxs, sorted_scattered_idxs,
                                 x_grouped, y_grouped)
     return O

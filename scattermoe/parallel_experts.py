@@ -27,30 +27,31 @@ class ParallelLinear(torch.autograd.Function):
             else:
                 output_expanded = None
 
-        ctx.save_for_backward(
-            x, expert_weights,
-            sorted_expert_idxs,
-            sorted_scattered_idxs,
-            padded_block_idxs, expert_offsets,
-            gates,
-            output_expanded
-        )
-        ctx.grouped_in = grouped_in
-        ctx.grouped_out = grouped_out
-        ctx.k = k
+            ctx.save_for_backward(
+                x, expert_weights,
+                sorted_expert_idxs,
+                sorted_scattered_idxs,
+                padded_block_idxs, expert_offsets,
+                gates,
+                output_expanded
+            )
+            ctx.grouped_in = grouped_in
+            ctx.grouped_out = grouped_out
+            ctx.k = k
         return output
     @staticmethod
     def backward(ctx, grad_out):
-        (x, expert_weights,
-         sorted_expert_idxs,
-         sorted_scattered_idxs,
-         padded_block_idxs, expert_offsets,
-         gates, output_expanded) = ctx.saved_tensors
-        k = ctx.k
-        grouped_in = ctx.grouped_in
-        grouped_out = ctx.grouped_out
-        # print("backward")
         with torch.device(grad_out.device):
+            (x, expert_weights,
+             sorted_expert_idxs,
+             sorted_scattered_idxs,
+             padded_block_idxs, expert_offsets,
+             gates, output_expanded) = ctx.saved_tensors
+            k = ctx.k
+            grouped_in = ctx.grouped_in
+            grouped_out = ctx.grouped_out
+            # print("backward")
+
             if gates is not None:
                 # calculate gates gradient
                 d_gates = torch.bmm(output_expanded, grad_out[:, :, None]).squeeze(-1)

@@ -680,7 +680,6 @@ class MixtralSparseMoeBlock(nn.Module):
             hidden_size=self.ffn_dim,
             num_experts=self.num_experts,
             top_k=self.top_k,
-            activation=ACT2FN[config.hidden_act]
         )
 
     def forward(self, hidden_states: torch.Tensor):
