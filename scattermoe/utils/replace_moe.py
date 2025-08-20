@@ -1,8 +1,24 @@
 import torch
 from .. import kernels, parallel_experts
 from torch.nn import functional as F
+
+def replace_function(cls, fun_name):
+    def decorator(fun):
+        import logging
+        def _fun(*args, **kwargs):
+            filename = fun.__code__.co_filename
+            name = fun.__name__
+            logging.info(f"Replacing `{cls.__name__}.{fun_name}` with {filename}:{name}")
+            setattr(cls, fun_name, fun)
+            return fun(*args, **kwargs)
+        setattr(cls, fun_name, _fun)
+
+    return decorator
+            
+
 try:
     from transformers.models.gpt_oss.modeling_gpt_oss import GptOssExperts, GptOssMLP, GptOssForCausalLM
+    @replace_function(cls=GptOssExperts, fun_name='forward')
     def gpt_oss_forward(self, hidden_states: torch.Tensor, router_indices=None, routing_weights=None) -> torch.Tensor:
         batch_size = hidden_states.shape[0]
         hidden_states = hidden_states.reshape(-1, self.hidden_size)  # (num_tokens, hidden_size)
@@ -38,14 +54,13 @@ try:
         next_states = out_.view(batch_size, -1, self.hidden_size)
 
         return next_states
-        
-    GptOssExperts.forward = gpt_oss_forward
 except:
     pass
 
 
 try: 
     from transformers.models.granitemoehybrid.modeling_granitemoehybrid import GraniteMoeHybridMoE
+    @replace_function(cls=GraniteMoeHybridMoE, fun_name='forward')
     def granite_moe_forward(self, layer_input):
         bsz, length, emb_size = layer_input.size()
         layer_input = layer_input.reshape(-1, emb_size)
@@ -78,7 +93,6 @@ try:
         )
         layer_output = layer_output.view(bsz, length, emb_size)
         return layer_output, router_logits
-    GraniteMoeHybridMoE.forward = granite_moe_forward 
 except:
     pass
 
