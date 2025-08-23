@@ -1,6 +1,7 @@
 import torch
 from .. import kernels, parallel_experts
 from torch.nn import functional as F
+from torch import nn
 
 def replace_function(cls, fun_name):
     def decorator(fun):
@@ -93,6 +94,32 @@ try:
         )
         layer_output = layer_output.view(bsz, length, emb_size)
         return layer_output, router_logits
+except:
+    pass
+
+
+
+try: 
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
+
+    fun = Qwen3MoeSparseMoeBlock.__init__
+    def qwen3moe__init__(self, config):
+        fun(self, config)
+        config.hidden_size
+        config.intermediate_size
+
+        gate_up_proj = nn.Parameter(torch.empty(num_experts, output_size, input_size))
+        def create_yell(expert_id, expert_weight_name):
+            def yell(module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+                print("Expert", expert_id, expert_weight_name)
+            return yell
+        for i, e in enumerate(self.experts):
+            e.gate_proj.register_load_state_dict_pre_hook(create_yell(i, "gate_proj"))
+            e.up_proj.register_load_state_dict_pre_hook(create_yell(i, "up_proj"))
+            e.down_proj.register_load_state_dict_pre_hook(create_yell(i, "down_proj"))
+
+    Qwen3MoeSparseMoeBlock.__init__ = qwen3moe__init__
+
 except:
     pass
 
