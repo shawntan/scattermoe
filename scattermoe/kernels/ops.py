@@ -1,47 +1,45 @@
 import torch
 import triton
 import triton.language as tl
-from torch.nn import functional as F
+from typing import Optional
 
 BLOCK_M = 128
-ALLOW_TF32 = False
+ALLOW_TF32 = True
 
-@torch.library.custom_op("scattermoe::bincount", mutates_args={})
-def compileable_bincount(x: torch.Tensor, minlength: int) -> torch.Tensor:
-        return x.bincount(minlength=minlength)
 
-@compileable_bincount.register_fake
-def _(x: torch.Tensor, minlength: int) -> torch.Tensor:
-    return torch.empty(minlength, dtype=torch.long, device=x.device)
 
-@torch.compile
-def flatten_and_sort(expert_idxs:torch.Tensor):
-    flattened_expert_idxs = expert_idxs.flatten()
-    sorted_expert_idxs, sorted_scattered_idxs = torch.sort(flattened_expert_idxs)
-    return sorted_expert_idxs, sorted_scattered_idxs
+@triton.jit
+def _compute_expert_block(
+    E_idx, E_mask,
+    M_in_idx,
+    N_block, N_mask,
+    X_ptr, stride_xm, stride_xk,
+    W_ptr, stride_we, stride_wk, stride_wn,
+    K,
+    acc,
+    no_k_mask,
+    BLOCK_K,
+    allow_tf32=True,
+):
 
-@torch.compile
-def padded_block_indices(sorted_experts_idxs: torch.Tensor, k: int, N_BLOCK_SIZE: int=BLOCK_M) :
-    expert_counts = compileable_bincount(sorted_experts_idxs, minlength=k)
-    padded_block_counts = ((expert_counts - 1) // N_BLOCK_SIZE) + 1
-    padded_expert_block_end = padded_block_counts.cumsum(-1)
-    expert_boundaries_end = expert_counts.cumsum(-1)
-    expert_boundaries_start = expert_boundaries_end - expert_counts
-    padded_expert_block_start = padded_expert_block_end - padded_block_counts
-    block_idxs = torch.arange(padded_expert_block_end[-1],
-                              dtype=sorted_experts_idxs.dtype,
-                              device=sorted_experts_idxs.device)
-    block_mask = (
-        (block_idxs[:, None] < padded_expert_block_start) |
-        (block_idxs[:, None] >= padded_expert_block_end)
-    )
-    expanded_block_idxs = (
-        N_BLOCK_SIZE * (block_idxs[:, None] - padded_expert_block_start) +
-        expert_boundaries_start
-    )
-    expanded_block_idxs = expanded_block_idxs.masked_fill(block_mask, 0).sum(-1)
-    return expanded_block_idxs, expert_boundaries_end
+    K_block = tl.arange(0, BLOCK_K)
+    X_blk_ptrs = X_ptr + M_in_idx[:, None] * stride_xm + K_block[None, :] * stride_xk
+    W_blk_ptrs = W_ptr + K_block[:, None] * stride_wk + N_block[None, :] * stride_wn + E_idx * stride_we
+    iters = tl.cdiv(K, BLOCK_K)
 
+    for K_block_id in range(iters):
+        if no_k_mask:
+            x = tl.load(X_blk_ptrs, mask=E_mask[:, None])
+            w = tl.load(W_blk_ptrs, mask=N_mask[None, :])
+        else:
+            K_mask = (K_block_id * BLOCK_K + K_block) < K
+            x = tl.load(X_blk_ptrs, mask=E_mask[:, None] & K_mask[None, :])
+            w = tl.load(W_blk_ptrs, mask=K_mask[:, None] & N_mask[None, :])
+
+        X_blk_ptrs += BLOCK_K * stride_xk
+        W_blk_ptrs += BLOCK_K * stride_wk
+        acc = tl.dot(x, w, acc, allow_tf32=allow_tf32)
+    return acc
 
 
 def _scatter2scatter_configs():
@@ -56,15 +54,17 @@ def _scatter2scatter_configs():
 })
 @triton.jit
 def _scatter2scatter(
-    X_ptr, stride_xm, stride_xk,
-    W_ptr, stride_we, stride_wk, stride_wn,
-    Y_ptr, stride_ym, stride_yn,
-    grouped_idx_ptr, expert_idxs_ptr, block_start_idx_ptr,
+    X_ptr, stride_xm: tl.constexpr, stride_xk: tl.constexpr,
+    W_ptr, stride_we, stride_wk: tl.constexpr, stride_wn: tl.constexpr,
+    Y_ptr, stride_ym: tl.constexpr, stride_yn: tl.constexpr,
+    B_ptr, stride_be: tl.constexpr, stride_bn: tl.constexpr,
+    grouped_idx_ptr, expert_idxs_ptr,
+    # block_start_idx_ptr,
     FAN_OUT: tl.constexpr,
     M, K: tl.constexpr, N: tl.constexpr, E: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     ACC_TYPE: tl.constexpr,
-    OUT_M,
+    # OUT_M,
     allow_tf32: tl.constexpr,
     x_grouped: tl.constexpr, y_grouped: tl.constexpr,
     NO_K_MASK: tl.constexpr, NO_N_MASK: tl.constexpr
@@ -74,90 +74,91 @@ def _scatter2scatter(
     N_BLOCK_COUNT = tl.cdiv(N, BLOCK_N)
     M_block_id = pid // N_BLOCK_COUNT
     N_block_id = pid % N_BLOCK_COUNT
-    M_range = tl.arange(0, BLOCK_M)
-    block_start_idx = tl.load(block_start_idx_ptr + M_block_id)
-    # M_block = tl.max_contiguous((block_start_idx + M_range) % OUT_M, BLOCK_M)
-    M_block = tl.max_contiguous(block_start_idx + M_range, BLOCK_M)
-    E_idxs = tl.load(expert_idxs_ptr + M_block, mask=M_block < (FAN_OUT * M), other=E)
-    E_idx = tl.min(E_idxs)
-    E_mask = E_idxs == E_idx
-    M_idx = tl.load(grouped_idx_ptr + M_block, mask=E_mask, other=0)
-    if x_grouped:
-        M_in_idx = M_block
-    else:
-        M_in_idx = M_idx // FAN_OUT
+
+    M_block = M_block_id * BLOCK_M + tl.arange(0, BLOCK_M)
+    N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
+    N_mask = N_block < N
+    M_boundary_mask = M_block < (FAN_OUT * M)
+    E_idxs = tl.load(expert_idxs_ptr + M_block, mask=M_boundary_mask, other=E)
+
+    no_k_mask = K % BLOCK_K == 0
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_TYPE)
+    E_first_idx = tl.min(E_idxs)
+    E_last_idx = tl.minimum(tl.max(E_idxs), E - 1)
+    M_idx = tl.load(grouped_idx_ptr + M_block, mask=M_boundary_mask).to(tl.int32)
+    for E_idx in range(E_first_idx, E_last_idx + 1):
+        E_mask = E_idxs == E_idx
+        E_M_idx = M_idx
+        if x_grouped:
+            M_in_idx = M_block
+        else:
+            M_in_idx = E_M_idx // FAN_OUT
+        acc = _compute_expert_block(
+            E_idx, E_mask,
+            M_in_idx, N_block, N_mask,
+            X_ptr, stride_xm, stride_xk,
+            W_ptr, stride_we, stride_wk, stride_wn,
+            K,
+            acc,
+            no_k_mask,
+            BLOCK_K,
+            allow_tf32=allow_tf32,
+        )
+
+    if B_ptr is not None:
+        B_blk_ptrs = B_ptr + E_idxs[:, None] * stride_be + N_block[None, :] * stride_bn
+        acc += tl.load(B_blk_ptrs, mask=M_boundary_mask[:, None] & N_mask[None, :])
 
     if y_grouped:
         M_out_idx = M_block
     else:
         M_out_idx = M_idx
-
-    K_block = tl.arange(0, BLOCK_K)
-
-    N_block = N_block_id * BLOCK_N  + tl.arange(0, BLOCK_N)
-    N_mask = N_block < N
-    # N_block = tl.max_contiguous(tl.multiple_of(N_block % N, BLOCK_N), BLOCK_N)
-    # N_block = N_block_id * BLOCK_N + tl.arange(0, BLOCK_N)
-
-    X_blk_ptrs = X_ptr + M_in_idx[:, None] * stride_xm + K_block[None, :] * stride_xk
-    W_blk_ptrs = W_ptr + K_block[:, None] * stride_wk + N_block[None, :] * stride_wn + E_idx * stride_we
-
-    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=ACC_TYPE)
-    iters = tl.cdiv(K, BLOCK_K)
-    for K_block_id in range(0, iters):
-        if NO_K_MASK:
-            x = tl.load(X_blk_ptrs, mask=E_mask[:, None])
-            if NO_N_MASK or K_block_id < (iters - 1):
-                w = tl.load(W_blk_ptrs)
-            else:
-                w = tl.load(W_blk_ptrs, mask=N_mask[None, :])
-        else:
-            K_mask = (K_block_id * BLOCK_K + K_block) < K
-            x = tl.load(X_blk_ptrs, mask=E_mask[:, None] & K_mask[None, :])
-            w = tl.load(W_blk_ptrs, mask=K_mask[:, None] & N_mask[None, :])
-        X_blk_ptrs += BLOCK_K * stride_xk
-        W_blk_ptrs += BLOCK_K * stride_wk
-        acc += tl.dot(x, w, allow_tf32=allow_tf32, out_dtype=ACC_TYPE)
-
     Y_blk_ptrs = Y_ptr + (M_out_idx[:, None] * stride_ym + N_block[None, :] * stride_yn)
-    tl.store(Y_blk_ptrs, acc, mask=E_mask[:, None] & N_mask[None, :])
+    tl.store(Y_blk_ptrs, acc, mask=M_boundary_mask[:, None] & N_mask[None, :])
 
 def scatter2scatter(X, W, sorted_expert_idxs, sorted_scattered_idxs, k,
-                    padded_block_idxs, x_grouped=False, y_grouped=False,
+                    b=None,
+                    x_grouped=False, y_grouped=False,
                     out=None):
     assert sorted_scattered_idxs.size(0) == sorted_expert_idxs.size(0)
     assert sorted_scattered_idxs.size(0) == X.size(0) * k
     # Pre-kernel setup
-    x_dim = X.size(-1)
     y_dim = W.size(-1)
     L_scattered = sorted_expert_idxs.size(0)
     if out is None:
-        O = torch.empty((L_scattered, y_dim), device=X.device, dtype=X.dtype)
+        output = torch.empty((L_scattered, y_dim), device=X.device, dtype=X.dtype)
     else:
         assert out.size(0) == L_scattered and out.size(1) == y_dim
-        O = out
+        output = out
 
-    scatter2scatter_compileable(O, W, X, k, padded_block_idxs, sorted_expert_idxs, sorted_scattered_idxs,
-                                x_grouped, y_grouped)
-    return O
+    scatter2scatter_compileable(output, W, X, k, sorted_expert_idxs, sorted_scattered_idxs,
+                                b, x_grouped, y_grouped)
+    return output
 
 
-@torch.library.custom_op("scattermoe::scatter2scatter", mutates_args={"O"})
+@torch.library.custom_op("scattermoe::scatter2scatter", mutates_args={"output"})
 def scatter2scatter_compileable(
-        O: torch.Tensor,
+        output: torch.Tensor,
         W: torch.Tensor,
         X: torch.Tensor,
         k: int,
-        padded_block_idxs: torch.Tensor,
         sorted_expert_idxs: torch.Tensor,
         sorted_scattered_idxs: torch.Tensor,
+        b: Optional[torch.Tensor],
         x_grouped: bool, y_grouped: bool) -> None:
     def grid(META):
         grid_num = (
-            padded_block_idxs.size(0) *
+            triton.cdiv(sorted_expert_idxs.size(0), META["BLOCK_M"]) *
             triton.cdiv(META['N'], META['BLOCK_N']),
         )
         return grid_num
+
+    if b is None:
+        b = None
+        stride_be = stride_bk = 0
+    else:
+        stride_be, stride_bk = b.stride()
 
     _scatter2scatter[grid](
         # X_ptr, stride_xm, stride_xk,
@@ -165,17 +166,18 @@ def scatter2scatter_compileable(
         # W_ptr, stride_we, stride_wk, stride_wn,
         W, W.stride(0), W.stride(1), W.stride(2),
         # Y_ptr, stride_ym, stride_yn,
-        O, O.stride(0), O.stride(1),
+        output, output.stride(0), output.stride(1),
+        # B_ptr, stride_be, stride_bk
+        b, stride_be, stride_bk,
         grouped_idx_ptr=sorted_scattered_idxs,
         expert_idxs_ptr=sorted_expert_idxs,
-        block_start_idx_ptr=padded_block_idxs,
+        # block_start_idx_ptr=padded_block_idxs,
         FAN_OUT=k,
         M=X.size(0),
         K=X.size(1),
-        N=O.size(1), E=W.size(0),
+        N=output.size(1), E=W.size(0),
         BLOCK_M=BLOCK_M,
         ACC_TYPE=tl.float32,
-        OUT_M=O.size(0),
         allow_tf32=ALLOW_TF32,
         x_grouped=x_grouped, y_grouped=y_grouped,
     )
@@ -186,17 +188,22 @@ def _config_XtY():
         triton.Config({'BLOCK_N': 128, 'BLOCK_K': 128, 'BLOCK_M': 32}, num_stages=4, num_warps=4),
     ]
 
-def group_bwd_W(DY, X, expert_offsets, E):
+def group_bwd_W(DY, X, expert_offsets, E, has_bias=False):
     DWt = torch.zeros((E, DY.size(-1), X.size(-1)), device=DY.device, dtype=DY.dtype)
     DW = DWt.permute(0, 2, 1)
-    groupXtY_compileable(E, DW, DY, X, expert_offsets)
-    return DW
+    if has_bias:
+        Db = torch.zeros((E, DY.size(-1)), device=DY.device, dtype=DY.dtype)
+    else:
+        Db = None
+    groupXtY_compileable(E, DW, Db, DY, X, expert_offsets)
+    return DW, Db
 
 
 @torch.library.custom_op("scattermoe::groupXtY", mutates_args={"DW"})
 def groupXtY_compileable(
         E: int,
         DW: torch.Tensor,
+        Db: Optional[torch.Tensor],
         DY: torch.Tensor,
         X: torch.Tensor,
         expert_offsets: torch.Tensor) -> None:
@@ -206,6 +213,12 @@ def groupXtY_compileable(
             triton.cdiv(META['N'], META['BLOCK_N']),
         )
         return grid
+    
+    if Db is None:
+        stride_dbe = 0
+        stride_dbn = 0
+    else:
+        stride_dbe, stride_dbn = Db.stride()
 
     _groupXtY[grid](
         # DY_ptr, stride_dym, stride_dyk,
@@ -214,13 +227,15 @@ def groupXtY_compileable(
         X, X.stride(0), X.stride(1),
         # DW_ptr, stride_dwe, stride_dwk, stride_dwn,
         DW, DW.stride(0), DW.stride(1), DW.stride(2),
+        # Db_ptr, stride_dwe, stride_dbn,
+        Db, stride_dbe, stride_dbn,
         # expert_offsets_ptr,
         expert_offsets,
         # K: tl.constexpr, N: tl.constexpr,
         M=DY.size(0), N=DY.size(-1), K=X.size(-1),
         # ACC_TYPE: tl.constexpr,
         ACC_TYPE=tl.float32,
-        allow_tf32=True
+        allow_tf32=ALLOW_TF32
     )
 
 
@@ -234,6 +249,7 @@ def _groupXtY(
     DY_ptr, stride_dym, stride_dyk,
     X_ptr, stride_xm, stride_xn,
     DW_ptr, stride_dwe, stride_dwk, stride_dwn,
+    Db_ptr, stride_dbe, stride_dbn,
     expert_offsets_ptr,
     M, K: tl.constexpr, N: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
@@ -259,6 +275,7 @@ def _groupXtY(
         start_idx = tl.load(expert_offsets_ptr + E_idx - 1).to(tl.int32)
     end_idx = tl.load(expert_offsets_ptr + E_idx).to(tl.int32)
 
+
     if end_idx > start_idx:
         M_block = tl.max_contiguous(start_idx + tl.arange(0, BLOCK_M), BLOCK_M)
 
@@ -273,29 +290,81 @@ def _groupXtY(
         M_idxs = M_block
         xt_blk_ptrs = X_ptr + K_block[:, None] * stride_xn + M_idxs[None, :] * stride_xm
         dy_blk_ptrs = DY_ptr + M_idxs[:, None] * stride_dym + N_block[None, :] * stride_dyk
+        if (Db_ptr is not None) and (K_block_id == 0):
+            _xty_and_bias(
+                E_idx, start_idx, end_idx,
+                M_block,
+                K_block, K_mask, N_block, N_mask, 
+                dy_blk_ptrs, stride_dym,
+                xt_blk_ptrs, stride_xm,
+                DW_ptr, stride_dwe, stride_dwk, stride_dwn,
+                Db_ptr, stride_dbe, stride_dbn,
+                BLOCK_M, BLOCK_N, BLOCK_K, ACC_TYPE,
+                allow_tf32, NO_K_MASK, NO_N_MASK,
+                compute_bias=True
+            )
+        else:
+            _xty_and_bias(
+                E_idx, start_idx, end_idx,
+                M_block,
+                K_block, K_mask, N_block, N_mask, 
+                dy_blk_ptrs, stride_dym,
+                xt_blk_ptrs, stride_xm,
+                DW_ptr, stride_dwe, stride_dwk, stride_dwn,
+                Db_ptr, stride_dbe, stride_dbn,
+                BLOCK_M, BLOCK_N, BLOCK_K, ACC_TYPE,
+                allow_tf32, NO_K_MASK, NO_N_MASK,
+                compute_bias=False
+            )
 
-        acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=ACC_TYPE)
-        iters = tl.cdiv(end_idx - start_idx, BLOCK_M)
-        for i in range(0, iters):
-            M_mask = (i * BLOCK_M + M_block) < end_idx
-            if NO_K_MASK:
-                xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
-            else:
-                xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None] & M_mask[None, :])
-            if NO_N_MASK:
-                dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
-            else:
-                dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
-            # acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
-            xt_blk_ptrs += BLOCK_M * stride_xm
-            dy_blk_ptrs += BLOCK_M * stride_dym
-            acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
 
+@triton.jit
+def _xty_and_bias(
+        E_idx, start_idx, end_idx,
+        M_block,
+        K_block, K_mask, N_block, N_mask, 
+        dy_blk_ptrs, stride_dym,
+        xt_blk_ptrs, stride_xm,
+        DW_ptr, stride_dwe, stride_dwk, stride_dwn,
+        Db_ptr, stride_dbe, stride_dbn,
+        BLOCK_M, BLOCK_N, BLOCK_K, ACC_TYPE,
+        allow_tf32, NO_K_MASK, NO_N_MASK,
+        compute_bias: tl.constexpr
+    ):
 
+    if compute_bias:
+        db_acc = tl.zeros((BLOCK_N,), dtype=ACC_TYPE)
+    else:
+        db_acc = None
 
-        DW_blk_ptrs = DW_ptr + E_idx * stride_dwe + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn
-        acc = acc.to(DW_blk_ptrs.dtype.element_ty)
-        tl.store(DW_blk_ptrs, acc, mask=K_mask[:, None] & N_mask[None, :])
+    acc = tl.zeros((BLOCK_K, BLOCK_N), dtype=ACC_TYPE)
+    iters = tl.cdiv(end_idx - start_idx, BLOCK_M)
+    for i in range(0, iters):
+        M_mask = (i * BLOCK_M + M_block) < end_idx
+        if NO_K_MASK:
+            xt = tl.load(xt_blk_ptrs, mask=M_mask[None, :])
+        else:
+            xt = tl.load(xt_blk_ptrs, mask=K_mask[:, None] & M_mask[None, :])
+        if NO_N_MASK:
+            dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None])
+        else:
+            dy = tl.load(dy_blk_ptrs, mask=M_mask[:, None] & N_mask[None, :])
+            
+        acc += tl.dot(xt, dy, out_dtype=ACC_TYPE, allow_tf32=allow_tf32)
+
+        xt_blk_ptrs += BLOCK_M * stride_xm
+        dy_blk_ptrs += BLOCK_M * stride_dym
+
+        if compute_bias:
+            db_acc += tl.sum(dy, axis=0)
+
+    DW_blk_ptrs = DW_ptr + E_idx * stride_dwe + K_block[:, None] * stride_dwk + N_block[None, :] * stride_dwn
+    acc = acc.to(DW_blk_ptrs.dtype.element_ty)
+    tl.store(DW_blk_ptrs, acc, mask=K_mask[:, None] & N_mask[None, :])
+    if compute_bias:
+        Db_blk_ptrs =  Db_ptr + E_idx * stride_dbe + N_block * stride_dbn
+        tl.store(Db_blk_ptrs, db_acc, mask=N_mask)
+
 
 
 def _config_grouping():

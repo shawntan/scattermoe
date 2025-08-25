@@ -48,10 +48,15 @@ If you use ScatterMoE in your project, cite us!
 
 Enjoy!
 ----
+
+###  Version 0.3.0
+
+- Refactored away padded indices
+- Allow bias
+- Inject MoE implementation into the following implementations by `import scattermoe.utils.replace_moe`
+  - `transformers.models.gpt_oss.modeling_gpt_oss` 
+  - `transformers.models.granitemoehybrid.modeling_granitemoehybrid`
+
 ###  Version 0.2.0
 
 - Made compileable.
-
------
-### More examples
-1. [Integration into HuggingFace Mixtral](https://github.com/shawntan/scattermoe/tree/main/examples/mixtral)

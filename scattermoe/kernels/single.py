@@ -1,7 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-from torch.nn import functional as F
 
 @triton.jit
 def _single2scatter(
