@@ -53,9 +53,19 @@ Enjoy!
 
 - Refactored away padded indices
 - Allow bias
-- Inject MoE implementation into the following implementations by `import scattermoe.utils.replace_moe`
+- Inject MoE implementation into the following implementations:
   - `transformers.models.gpt_oss.modeling_gpt_oss` 
   - `transformers.models.granitemoehybrid.modeling_granitemoehybrid`
+Just do this:
+```sh
+git clone git@github.com:shawntan/scattermoe.git
+cd scattermoe
+pip install -e .
+```
+```python
+import transformers
+import scattermoe.utils.replace_moe # put this line after wherever you import transformers
+```
 
 ###  Version 0.2.0
 
